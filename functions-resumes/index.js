@@ -2287,9 +2287,9 @@ function localResponseFromInput(input, revisionInstruction) {
         label: skill,
         value: skillValue(skill, job, candidateSource),
       })),
-      experience_title: candidateExperienceTitle(input, role),
+      experience_title: primaryCandidateExperienceEntry(input).title || candidateExperienceTitle(input, role),
       experience_organization: candidateOrganizationLine(input),
-      experience_relevance: `Relevant to ${role}`,
+      experience_relevance: primaryCandidateExperienceEntry(input).dateRange || "[Start Month Year] - [End Month Year]",
       experience_bullets: buildExperienceBullets(input, role, job, workEvidence),
       education_items: extractRelevantEducation(input, job, role),
       interest_items: extractRelevantInterests(input, job, role),
@@ -2662,12 +2662,19 @@ function applyPageOne(table, topParagraphs, response, input) {
 
 function pageOneExperienceContext(input, response) {
   const role = cleanRoleLabel(input.targetRole || response.role || "Target Role");
-  const title = candidateExperienceTitle(input, role);
-  const organizationLine = candidateOrganizationLine(input);
+  const entry = primaryCandidateExperienceEntry(input);
+  const title = entry.title || candidateExperienceTitle(input, role);
+  const company = entry.organization || candidateOrganizationLine(input);
+  const organizationLine = `${company || "[Company]"} | ${entry.dateRange || "[Start Month Year] - [End Month Year]"}`;
+  const locationParts = [
+    entry.location || "[City, State]",
+    entry.tenure || "[Years at Company]",
+    entry.dateRange ? "" : "Fill any employment gaps",
+  ].filter(Boolean);
   return {
     title,
     organizationLine,
-    relevanceLine: `Relevant to ${role}`,
+    relevanceLine: locationParts.join(" | "),
   };
 }
 
@@ -2847,15 +2854,22 @@ function ensureSectionPageBreaks(dom, body, response) {
 }
 
 function insertPageBreakBefore(dom, body, paragraph) {
+  removeEmptyPageBreakBefore(body, paragraph);
+  if (hasPageBreakBefore(paragraph)) return;
+  let pPr = directChildren(paragraph, "pPr")[0];
+  if (!pPr) {
+    pPr = dom.createElementNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "w:pPr");
+    paragraph.insertBefore(pPr, paragraph.firstChild);
+  }
+  const pageBreak = dom.createElementNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "w:pageBreakBefore");
+  pPr.appendChild(pageBreak);
+}
+
+function removeEmptyPageBreakBefore(body, paragraph) {
   const previous = previousElementSibling(paragraph);
-  if (hasPageBreak(paragraph) || hasPageBreak(previous)) return;
-  const breakParagraph = dom.createElementNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "w:p");
-  const run = dom.createElementNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "w:r");
-  const br = dom.createElementNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "w:br");
-  br.setAttribute("w:type", "page");
-  run.appendChild(br);
-  breakParagraph.appendChild(run);
-  body.insertBefore(breakParagraph, paragraph);
+  if (previous && hasPageBreak(previous) && !paragraphText(previous).trim()) {
+    body.removeChild(previous);
+  }
 }
 
 function previousElementSibling(node) {
@@ -2863,6 +2877,15 @@ function previousElementSibling(node) {
     if (current.nodeType === 1) return current;
   }
   return null;
+}
+
+function hasPageBreakBefore(paragraph) {
+  if (!paragraph) return false;
+  const nodes = paragraph.getElementsByTagName("*");
+  for (let i = 0; i < nodes.length; i += 1) {
+    if (nodes[i].localName === "pageBreakBefore") return true;
+  }
+  return false;
 }
 
 function hasPageBreak(paragraph) {
@@ -3384,7 +3407,119 @@ function keywordMatchesLine(skill, line) {
   return Boolean(firstWord && new RegExp(`\\b${escapeRegExp(firstWord)}\\b`, "i").test(line));
 }
 
+function primaryCandidateExperienceEntry(input) {
+  return extractCandidateExperienceEntries(input)[0] || {};
+}
+
+function extractCandidateExperienceEntries(input = {}) {
+  const entries = [];
+  for (const line of candidateSupplementLines(input)) {
+    const entry = parseCandidateExperienceEntry(line, input);
+    if (entry) entries.push(entry);
+  }
+  return dedupeExperienceEntries(entries);
+}
+
+function parseCandidateExperienceEntry(line, input = {}) {
+  const value = cleanMultilineTextForAi(line).replace(/\s+/g, " ").trim();
+  if (!value) return null;
+  const titlePattern = "(?:IT Engineer|Systems? Administrator|Systems? Engineer|IT Generalist|Office Assistant|Technical Support Specialist|Retail Lead|Lead Associate|Accounting Support|Customer Support|Project Coordinator|Operations Coordinator)";
+  const monthPattern = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*";
+  const datePattern = `(${monthPattern}\\s+\\d{4}\\s*(?:-|to)\\s*(?:${monthPattern}\\s+\\d{4}|Present|Current))`;
+  const knownOrgPattern = "([A-Z][A-Za-z0-9&'. -]{2,90}?(?:Nationwide|Tools|Group|Company|Co\\.?|LLC|Inc\\.?|Auto Group|Financial|Apps|Systems|Technologies|Solutions))";
+  const withOrg = value.match(new RegExp(`\\b(${titlePattern})\\b\\s+${knownOrgPattern}(?:\\s*\\(([^)]{3,90})\\))?(?:\\s+${datePattern})?`, "i"));
+  if (withOrg) {
+    return cleanExperienceEntry({
+      title: withOrg[1],
+      organization: withOrg[2],
+      location: withOrg[3],
+      dateRange: withOrg[4],
+    }, input);
+  }
+  const atOrg = value.match(new RegExp(`\\b(${titlePattern})\\b\\s+at\\s+([A-Z][A-Za-z0-9&'. -]{2,90}?)(?:[.,;]|\\s{2,}|$)(?:.*?${datePattern})?`, "i"));
+  if (atOrg) {
+    return cleanExperienceEntry({
+      title: atOrg[1],
+      organization: atOrg[2],
+      dateRange: atOrg[3],
+    }, input);
+  }
+  return null;
+}
+
+function cleanExperienceEntry(entry, input = {}) {
+  const title = titleCasePhrase(entry.title);
+  const organization = cleanCandidateOrganization(entry.organization, input);
+  const dateRange = cleanDateRange(entry.dateRange);
+  const location = cleanExperienceLocation(entry.location);
+  if (!title && !organization) return null;
+  return {
+    title,
+    organization,
+    dateRange,
+    location,
+    tenure: dateRange ? tenureFromDateRange(dateRange) : "",
+  };
+}
+
+function dedupeExperienceEntries(entries) {
+  const seen = new Set();
+  const result = [];
+  for (const entry of entries) {
+    const key = `${entry.title}|${entry.organization}`.toLowerCase();
+    if ((entry.title || entry.organization) && !seen.has(key)) {
+      seen.add(key);
+      result.push(entry);
+    }
+  }
+  return result;
+}
+
+function cleanDateRange(value) {
+  return asText(value)
+    .replace(/\s*(?:-|to)\s*/i, " - ")
+    .replace(/\bSept\b/i, "Sep")
+    .replace(/\bCurrent\b/i, "Present")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cleanExperienceLocation(value) {
+  return asText(value)
+    .split(/\s+\|\s+/)
+    .map((part) => part.trim())
+    .filter((part) => part && !/^(remote|hybrid)$/i.test(part))
+    .join(" | ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tenureFromDateRange(value) {
+  const match = asText(value).match(/\b([A-Za-z]{3,9})\s+(\d{4})\s+-\s+(?:(Present)|([A-Za-z]{3,9})\s+(\d{4}))/i);
+  if (!match) return "";
+  const start = monthYearToDate(match[1], match[2]);
+  const end = match[3] ? new Date() : monthYearToDate(match[4], match[5]);
+  if (!start || !end || end < start) return "";
+  let months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
+  if (months < 0) return "";
+  const years = Math.floor(months / 12);
+  months %= 12;
+  if (years && months) return `${years} yrs ${months} mos`;
+  if (years) return `${years} yrs`;
+  return `${months || 1} mos`;
+}
+
+function monthYearToDate(month, year) {
+  const normalized = asText(month).slice(0, 3).toLowerCase();
+  const index = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(normalized);
+  const number = Number(year);
+  if (index < 0 || !Number.isFinite(number)) return null;
+  return new Date(Date.UTC(number, index, 1));
+}
+
 function candidateExperienceTitle(input, role) {
+  const entry = primaryCandidateExperienceEntry(input);
+  if (entry.title) return entry.title;
   const titles = extractCandidateJobTitles(input);
   if (titles.length) return titles.slice(0, 2).join(" & ");
   const text = `${input.workHistory || ""}\n${input.notes || ""}`;
@@ -3397,8 +3532,10 @@ function candidateExperienceTitle(input, role) {
 }
 
 function candidateOrganizationLine(input) {
+  const entry = primaryCandidateExperienceEntry(input);
+  if (entry.organization) return entry.organization;
   const organizations = extractCandidateOrganizations(input.workHistory || input.notes || "", input);
-  return organizations.length ? organizations.slice(0, 3).join(" | ") : "Resume work history";
+  return organizations.length ? organizations.slice(0, 3).join(" | ") : "[Company]";
 }
 
 function extractCandidateJobTitles(input) {
@@ -3527,7 +3664,7 @@ function isInterestSourceLine(line) {
 function candidateSupplementLines(input = {}) {
   return cleanMultilineTextForAi([input.workHistory, input.notes].filter(Boolean).join("\n"))
     .split(/\r?\n+|[â€¢]/)
-    .flatMap((line) => line.split(/\s+-\s+(?=[A-ZI][A-Za-z])/))
+    .flatMap((line) => line.split(/(?<!\d{4})\s+-\s+(?=[A-ZI][A-Za-z])/))
     .map((line) => line.replace(/^[*-]\s*/, "").replace(/\s+/g, " ").trim())
     .filter(Boolean);
 }
@@ -3672,7 +3809,7 @@ function splitCandidateSourceLines(text) {
   return cleanMultilineTextForAi(text)
     .replace(/\s+\|\s+/g, "\n")
     .split(/\r?\n+|[•]/)
-    .flatMap((line) => line.split(/\s+-\s+(?=[A-Z][A-Za-z])/))
+    .flatMap((line) => line.split(/(?<!\d{4})\s+-\s+(?=[A-Z][A-Za-z])/))
     .map((line) => line.replace(/^[*-]\s*/, "").replace(/\s+/g, " ").trim())
     .filter(Boolean);
 }

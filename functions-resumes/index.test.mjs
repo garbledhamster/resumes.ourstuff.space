@@ -87,8 +87,10 @@ describe("ResumeDoc generator", () => {
 
     expect(experienceIndex).toBeGreaterThan(0);
     expect(lines[experienceIndex + 1]).toBe("Office Assistant");
-    expect(lines[experienceIndex + 2]).toBe("Example Co");
-    expect(lines[experienceIndex + 2]).not.toBe("Acme Company");
+    expect(lines[experienceIndex + 2]).toBe("Example Co | [Start Month Year] - [End Month Year]");
+    expect(lines[experienceIndex + 2]).not.toContain("Acme Company");
+    expect(lines[experienceIndex + 3]).toContain("[City, State]");
+    expect(lines[experienceIndex + 3]).not.toMatch(/Relevant to/i);
     expect(text).not.toContain("ADDITIONAL CONTEXT");
     expect(text).not.toContain("Application Focus");
   });
@@ -142,6 +144,34 @@ describe("ResumeDoc generator", () => {
     expect(response.page_1.experience_organization).toBe("Harbor Freight | Kunes");
   });
 
+  it("recovers company dates location and tenure from embedded resume work history", async () => {
+    const embedded = [
+      "Role-Focused Resume Packet",
+      "Tailored background toward Systems Administrator Joseph Rice SYSTEM ADMINISTRATOR Network & Security Professional",
+      "IT Engineer Computers Nationwide (Remote | Vernon Hills, IL) Sep 2015 - Apr 2025 Managed operations and security for 70+ SMB networks.",
+    ].join("\n");
+    const input = api.normalizeInput({
+      fullName: "Joseph Rice",
+      email: "jmjrice94@gmail.com",
+      phone: "2623487425",
+      location: "Saint Paul, Minnesota",
+      targetRole: "Systems Administrator",
+      jobPost: "Senior IT Systems Engineer SJE",
+      workHistory: embedded,
+    });
+    const response = api.validatePacketResponse(api.localResponseFromInput(input), input);
+    const output = await api.buildDocx(response, input);
+    const text = await api.extractDocxText(output.docx);
+    const lines = text.split("\n");
+    const experienceIndex = lines.indexOf("RELEVANT EXPERIENCE");
+
+    expect(lines[experienceIndex + 1]).toBe("IT Engineer");
+    expect(lines[experienceIndex + 2]).toBe("Computers Nationwide | Sep 2015 - Apr 2025");
+    expect(lines[experienceIndex + 3]).toContain("Vernon Hills, IL");
+    expect(lines[experienceIndex + 3]).toContain("9 yrs 7 mos");
+    expect(lines[experienceIndex + 3]).not.toMatch(/Relevant to/i);
+  });
+
   it("scrubs source-template terms from document XML metadata", async () => {
     const input = sampleInput();
     const response = api.validateResponse(api.localResponseFromInput(input), input);
@@ -161,7 +191,8 @@ describe("ResumeDoc generator", () => {
 
     expect(xml).toContain('w:fill="E97132"');
     expect(xml).not.toContain('w:fill="2563EB"');
-    expect((xml.match(/w:type="page"/g) || [])).toHaveLength(4);
+    expect((xml.match(/<w:pageBreakBefore\/?>/g) || [])).toHaveLength(4);
+    expect((xml.match(/w:type="page"/g) || [])).toHaveLength(0);
   });
 
   it("keeps the template visual slots inside the DOCX", async () => {
