@@ -55,8 +55,15 @@ function Invoke-Logged {
   Push-Location $WorkingDirectory
   try {
     "PS> $Command" | Set-Content -LiteralPath $log -Encoding UTF8
-    $output = Invoke-Expression $Command 2>&1
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+      $output = Invoke-Expression $Command 2>&1
+      $exitCode = $LASTEXITCODE
+    }
+    finally {
+      $ErrorActionPreference = $previousErrorActionPreference
+    }
     $output | Add-Content -LiteralPath $log -Encoding UTF8
     if ($exitCode -ne 0 -and $null -ne $exitCode) {
       Add-Check $Name "failed" $log
@@ -108,8 +115,15 @@ function Invoke-GitOutput {
 
   Push-Location $Root
   try {
-    $output = & $script:GitCommand @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+      $output = & $script:GitCommand @Arguments 2>&1
+      $exitCode = $LASTEXITCODE
+    }
+    finally {
+      $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($exitCode -ne 0) {
       throw (($output | ForEach-Object { $_.ToString() }) -join "`n")
     }
@@ -132,8 +146,15 @@ function Invoke-GitLogged {
   Push-Location $Root
   try {
     "PS> $script:GitCommand $($Arguments -join ' ')" | Set-Content -LiteralPath $log -Encoding UTF8
-    $output = & $script:GitCommand @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+      $output = & $script:GitCommand @Arguments 2>&1
+      $exitCode = $LASTEXITCODE
+    }
+    finally {
+      $ErrorActionPreference = $previousErrorActionPreference
+    }
     $output | Add-Content -LiteralPath $log -Encoding UTF8
     if ($exitCode -ne 0) {
       Add-Check $Name "failed" $log
