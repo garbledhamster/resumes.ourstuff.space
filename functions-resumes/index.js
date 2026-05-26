@@ -1608,6 +1608,7 @@ function scrubSourceTemplateTermsXml(xml, response, input) {
   const candidate = input.fullName || response.profile_cards?.interviewee?.name || "Candidate";
   const role = response.role || input.targetRole || "Target Role";
   const company = response.company || "Target Company";
+  const allowed = allowedLeftoverText(response, input);
   const replacements = new Map([
     ["Joseph (Joe) Rice", candidate],
     ["Joseph", candidate],
@@ -1626,6 +1627,7 @@ function scrubSourceTemplateTermsXml(xml, response, input) {
   ]);
   let output = xml;
   for (const [source, target] of replacements.entries()) {
+    if (allowed.includes(source.toLowerCase())) continue;
     output = output.replace(new RegExp(escapeRegExp(source), "gi"), escapeXml(target));
   }
   return output;
@@ -1747,8 +1749,17 @@ function initialsFromName(name) {
 }
 
 function scanLeftoversXml(xml, response, input = {}) {
+  const allowed = allowedLeftoverText(response, input);
+  const haystack = xml.toLowerCase();
+  const found = LEFTOVER_TERMS.filter((term) => !allowed.includes(term.toLowerCase()) && haystack.includes(term.toLowerCase()));
+  if (found.length) {
+    throw new Error(`Generated document still contains source-template terms: ${found.join(", ")}`);
+  }
+}
+
+function allowedLeftoverText(response, input = {}) {
   const cards = response.profile_cards || {};
-  const allowed = [
+  return [
     response.company,
     response.role,
     input.fullName,
@@ -1761,11 +1772,6 @@ function scanLeftoversXml(xml, response, input = {}) {
     cards.interviewee?.name,
     cards.interviewee?.title,
   ].join(" ").toLowerCase();
-  const haystack = xml.toLowerCase();
-  const found = LEFTOVER_TERMS.filter((term) => !allowed.includes(term.toLowerCase()) && haystack.includes(term.toLowerCase()));
-  if (found.length) {
-    throw new Error(`Generated document still contains source-template terms: ${found.join(", ")}`);
-  }
 }
 
 async function extractTextFromFile(fileName, contentType, bytes) {
