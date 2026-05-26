@@ -291,6 +291,7 @@ describe("ResumeDoc generator", () => {
 
     expect(prompts).toHaveLength(6);
     expect(payloads.every((payload) => payload.model === "~openai/gpt-latest")).toBe(true);
+    expect(payloads.map((payload) => payload.max_tokens)).toEqual([2600, 2380, 2600, 2600, 940, 1150]);
     expect(payloads.every((payload) => payload.reasoning?.effort === "low")).toBe(true);
     expect(payloads.every((payload) => payload.reasoning?.exclude === true)).toBe(true);
     expect(prompts[0].input_context.source_chunks.map((chunk) => chunk.type)).toContain("work_history");

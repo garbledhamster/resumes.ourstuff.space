@@ -40,10 +40,12 @@ const REQUIREMENT_COUNT = 7;
 const WHY_JOIN_COUNT = 4;
 const REFERENCE_COUNT = 3;
 const ACTIVITY_LIMIT = 80;
+const MIN_SECTION_OUTPUT_TOKENS = 700;
+const MAX_SECTION_OUTPUT_TOKENS = 2600;
 const MAX_TEXT = 70000;
 const MAX_FILE_BYTES = 7 * 1024 * 1024;
 const MAX_AI_CHUNK_CHARS = 2200;
-const MAX_SECTION_CONTEXT_CHARS = 7200;
+const MAX_SECTION_CONTEXT_CHARS = 18000;
 const MAX_MEMORY_ITEMS = 12;
 const LEFTOVER_TERMS = [
   "Joseph",
@@ -1265,8 +1267,8 @@ function outputPath(uid, packageId, generationId, ext) {
 
 async function generateAndStore({ actor, pkg, input, revisionInstruction, countRevision }) {
   const generationId = crypto.randomUUID();
-  await appendPackageActivity(pkg.id, "ai_drafting", "Jobel is asking the flagship model to draft the resume sections one at a time with low-thinking mode.", "info");
-  const response = await buildPacketResponse(input, revisionInstruction);
+  await appendPackageActivity(pkg.id, "ai_drafting", "Jobel is asking the flagship OpenAI model to draft the resume sections with low reasoning and a larger output budget.", "info");
+  const response = await buildPacketResponse(input, revisionInstruction, { packageId: pkg.id });
   await appendPackageActivity(pkg.id, "quality_review", "Jobel finished the quality review for copied job-post headers, repeated contact details, and generic scaffold text.", "good");
   const now = nowIso();
   const generatedTitle = outputTitleWithTimestamp(response.output_file_label || pkg.title || titleFromInput(input), now);
@@ -1318,10 +1320,10 @@ async function generateAndStore({ actor, pkg, input, revisionInstruction, countR
   return { ok: true, package: publicPackage({ ...pkg, ...patch }), generationId };
 }
 
-async function buildPacketResponse(input, revisionInstruction) {
+async function buildPacketResponse(input, revisionInstruction, options = {}) {
   if (process.env.OPENROUTER_API_KEY) {
     try {
-      const response = await buildPacketResponseWithOpenRouter(input, revisionInstruction);
+      const response = await buildPacketResponseWithOpenRouter(input, revisionInstruction, options);
       return validatePacketResponse(response, input);
     } catch (error) {
       console.warn("openrouter_generation_failed", error.message);
@@ -1334,7 +1336,7 @@ async function buildPacketResponse(input, revisionInstruction) {
   return validatePacketResponse(localResponseFromInput(input, revisionInstruction), input);
 }
 
-async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
+async function buildPacketResponseWithOpenRouter(input, revisionInstruction, options = {}) {
   const baseline = localResponseFromInput(input, revisionInstruction);
   const context = packetPromptContext(input, revisionInstruction, baseline);
   const sectionTasks = [
@@ -1454,9 +1456,11 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
 
   let packetMemory = initialPacketMemory(context);
   for (const task of sectionTasks) {
+    await appendPackageActivity(options.packageId, `draft_${task.key}`, `Jobel is drafting ${task.label}.`, "info");
     const sectionResult = await callOpenRouterSection(context, task, packetMemory);
     output[task.key] = sectionResult.output;
     packetMemory = mergePacketMemory(packetMemory, sectionResult.memory, task, output[task.key]);
+    await appendPackageActivity(options.packageId, `drafted_${task.key}`, `Jobel finished ${task.label} and carried forward the source notes.`, "good");
   }
   output.generation_memory = packetMemory;
   return output;
@@ -1998,7 +2002,7 @@ async function callOpenRouterSection(context, task, packetMemory) {
   };
   const response = await callOpenRouterJson(systemPrompt, JSON.stringify(userPrompt, null, 2), {
     allowWeb: task.allowWeb === true,
-    maxTokens: 2200,
+    maxTokens: dynamicSectionOutputTokens(task),
   });
   const sectionOutput = response?.[task.key] && typeof response[task.key] === "object"
     ? response[task.key]
@@ -2009,6 +2013,31 @@ async function callOpenRouterSection(context, task, packetMemory) {
     output: sectionOutput,
     memory: normalizeSectionMemory(response?.memory, task, sectionOutput),
   };
+}
+
+function dynamicSectionOutputTokens(task) {
+  const counts = task?.counts && typeof task.counts === "object" ? task.counts : {};
+  const countTotal = Object.values(counts).reduce((total, value) => total + (Number(value) || 0), 0);
+  const hasMemory = 420;
+  const baseBySection = {
+    page_1: 900,
+    skill_tracker: 760,
+    interview_prep: 920,
+    company_role_brief: 1040,
+    profile_cards: 520,
+    references: 520,
+  };
+  const perItem = {
+    page_1: 95,
+    skill_tracker: 75,
+    interview_prep: 80,
+    company_role_brief: 78,
+    profile_cards: 120,
+    references: 70,
+  };
+  const base = baseBySection[task?.key] || 800;
+  const estimated = base + (countTotal * (perItem[task?.key] || 80)) + hasMemory;
+  return Math.max(MIN_SECTION_OUTPUT_TOKENS, Math.min(MAX_SECTION_OUTPUT_TOKENS, estimated));
 }
 
 function stripModelMemoryKey(response) {
@@ -2029,7 +2058,7 @@ async function callOpenRouterJson(systemPrompt, userPrompt, options = {}) {
       { role: "user", content: userPrompt },
     ],
     temperature: 0.18,
-    max_tokens: options.maxTokens || 2600,
+    max_tokens: options.maxTokens || 1800,
     reasoning: RESUME_PACKET_REASONING,
     response_format: { type: "json_object" },
   };
@@ -2048,6 +2077,12 @@ async function callOpenRouterJson(systemPrompt, userPrompt, options = {}) {
   const raw = await postOpenRouter(payload).catch(async (error) => {
     const message = String(error.message || "");
     const fallback = JSON.parse(JSON.stringify(payload));
+    if (error.code === "openrouter_credit_limit" && error.affordableTokens && payload.max_tokens > 350) {
+      fallback.max_tokens = Math.max(320, Math.min(payload.max_tokens - 120, error.affordableTokens - 64));
+      if (fallback.max_tokens < payload.max_tokens) {
+        return postOpenRouter(fallback);
+      }
+    }
     if (message.includes("response_format")) {
       delete fallback.response_format;
       return postOpenRouter(fallback);
@@ -2080,9 +2115,33 @@ async function postOpenRouter(payload) {
   });
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`OpenRouter request failed: HTTP ${response.status} ${text.slice(0, 700)}`);
+    throw openRouterHttpError(response.status, text);
   }
   return text;
+}
+
+function openRouterHttpError(status, text) {
+  let parsed = {};
+  try {
+    parsed = text ? JSON.parse(text) : {};
+  } catch {}
+  const rawMessage = String(parsed?.error?.message || parsed?.message || text || "").slice(0, 700);
+  if (status === 402) {
+    const affordableTokens = Number(rawMessage.match(/can only afford\s+(\d+)/i)?.[1] || 0);
+    const error = httpError(
+      402,
+      affordableTokens
+        ? `OpenRouter credit limit stopped Jobel: this account can currently afford about ${affordableTokens} tokens for the next model call.`
+        : "OpenRouter needs more credits before Jobel can finish this packet.",
+      "openrouter_credit_limit",
+    );
+    if (affordableTokens) error.affordableTokens = affordableTokens;
+    return error;
+  }
+  if (status === 401 || status === 403) {
+    return httpError(status, "OpenRouter rejected the API key or account permissions.", "openrouter_auth_failed");
+  }
+  return httpError(502, `OpenRouter request failed with HTTP ${status}.`, "openrouter_request_failed");
 }
 
 function parseJsonObject(text) {
