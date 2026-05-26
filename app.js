@@ -29,6 +29,7 @@ const state = {
   activePackage: null,
   packages: [],
   packagesLoaded: false,
+  packageRefreshTimer: null,
   access: null,
   apiBaseOverride: "",
   notes: [],
@@ -513,10 +514,12 @@ async function initializeFirebase() {
       await loadAccess();
       await loadPackages();
       await loadActivePackage();
+      startPackageLiveRefresh();
       startNotesListener(user.uid);
       await handlePaymentReturn();
       if (state.access?.admin) await loadAdminData();
     } else {
+      stopPackageLiveRefresh();
       stopNotesListener();
       state.notes = [];
       state.notesLoaded = false;
@@ -630,11 +633,45 @@ async function loadPackages() {
     const result = await api("/packages");
     state.packages = Array.isArray(result.packages) ? result.packages : [];
     state.packagesLoaded = true;
+    syncActivePackageFromList();
   } catch (error) {
     state.packagesLoaded = true;
     log(error.message);
   } finally {
     render();
+  }
+}
+
+async function refreshPackagesLive() {
+  if (!state.user || state.busy) return;
+  try {
+    const result = await api("/packages");
+    state.packages = Array.isArray(result.packages) ? result.packages : [];
+    state.packagesLoaded = true;
+    syncActivePackageFromList();
+    render();
+  } catch {
+    // Keep live refresh quiet; explicit actions still log errors.
+  }
+}
+
+function syncActivePackageFromList() {
+  if (!state.activePackage?.id) return;
+  const fresh = state.packages.find((item) => item.id === state.activePackage.id);
+  if (fresh) {
+    state.activePackage = { ...state.activePackage, ...fresh };
+  }
+}
+
+function startPackageLiveRefresh() {
+  stopPackageLiveRefresh();
+  state.packageRefreshTimer = window.setInterval(refreshPackagesLive, 30000);
+}
+
+function stopPackageLiveRefresh() {
+  if (state.packageRefreshTimer) {
+    window.clearInterval(state.packageRefreshTimer);
+    state.packageRefreshTimer = null;
   }
 }
 
@@ -785,8 +822,13 @@ async function submitRevision() {
 
 async function downloadDocx() {
   const pkg = state.activePackage;
-  if (!pkg?.latestGenerationId) return;
-  await downloadPackageDocx(pkg.id, pkg.title);
+  if (!pkg?.id) return;
+  if (!pkg.latestGenerationId) {
+    await refreshPackagesLive();
+  }
+  const fresh = state.activePackage;
+  if (!fresh?.latestGenerationId) return;
+  await downloadPackageDocx(fresh.id, fresh.title);
 }
 
 async function downloadPackageDocx(packageId, title) {
@@ -1601,7 +1643,14 @@ els.noteEditorForm.addEventListener("submit", saveNote);
 els.deleteNoteBtn.addEventListener("click", deleteActiveNote);
 els.jobelInput.addEventListener("input", renderNotesDrawer);
 els.jobelForm.addEventListener("submit", sendJobelMessage);
-window.addEventListener("online", retryPendingBrainSync);
+window.addEventListener("online", () => {
+  retryPendingBrainSync();
+  refreshPackagesLive();
+});
+window.addEventListener("focus", refreshPackagesLive);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshPackagesLive();
+});
 els.adminUserSearchBtn.addEventListener("click", searchAdminUsers);
 els.adminCodeForm.addEventListener("submit", submitAdminCode);
 els.adminPanel.addEventListener("click", handleAdminClick);

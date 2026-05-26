@@ -17,12 +17,13 @@ const AI_BRAIN_API_TOKEN_SECRET = defineSecret("AI_BRAIN_API_TOKEN");
 
 const TEMPLATE_PATH = path.join(__dirname, "assets", "interview-packet-template.docx");
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const PROMPT_VERSION = "2026-05-26-resumedoc-full-packet";
+const PROMPT_VERSION = "2026-05-26-resumedoc-segmented-packet";
 const RESUMEDOC_APP_ID = "resumedoc";
 const JOBEL_NOTE_MARKER = "ai:jobel-note";
 const AI_BRAIN_DEFAULT_BASE = "https://api.ourstuff.space/v1";
 const SOURCE_ACCENT_HEX = "E97132";
-const DEFAULT_ACCENT_HEX = "2563EB";
+const DEFAULT_ACCENT_HEX = SOURCE_ACCENT_HEX;
+const DEFAULT_PACKET_MODEL = "anthropic/claude-sonnet-4";
 const SKILL_ITEM_COUNT = 9;
 const EXPERIENCE_BULLET_COUNT = 7;
 const ABOUT_ME_COUNT = 6;
@@ -828,8 +829,7 @@ async function generateAndStore({ actor, pkg, input, revisionInstruction, countR
 async function buildPacketResponse(input, revisionInstruction) {
   if (process.env.OPENROUTER_API_KEY) {
     try {
-      const [systemPrompt, userPrompt] = buildPrompt(input, revisionInstruction);
-      const response = await callOpenRouter(systemPrompt, userPrompt);
+      const response = await buildPacketResponseWithOpenRouter(input, revisionInstruction);
       return validateResponse(response, input);
     } catch (error) {
       console.warn("openrouter_generation_failed", error.message);
@@ -839,6 +839,118 @@ async function buildPacketResponse(input, revisionInstruction) {
     }
   }
   return validateResponse(localResponseFromInput(input, revisionInstruction), input);
+}
+
+async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
+  const baseline = localResponseFromInput(input, revisionInstruction);
+  const context = packetPromptContext(input, revisionInstruction, baseline);
+  const sectionTasks = [
+    {
+      key: "page_1",
+      label: "resume first page",
+      value: baseline.page_1,
+      counts: {
+        skill_items: SKILL_ITEM_COUNT,
+        experience_bullets: EXPERIENCE_BULLET_COUNT,
+      },
+      instructions: [
+        "Rewrite the first resume page only.",
+        "Use actual candidate evidence from workHistory. Do not use contact/header lines as accomplishments.",
+        "Return concise text that will fit existing Word template paragraphs.",
+        "Do not return colors, style, layout, page-break, markdown, or DOCX instructions.",
+      ],
+    },
+    {
+      key: "skill_tracker",
+      label: "skill tracker visual text",
+      value: baseline.skill_tracker,
+      counts: {
+        strongest_skills: 5,
+        transferable_evidence: 4,
+        growth_areas: 3,
+        talking_points: 4,
+      },
+      instructions: [
+        "Rewrite only the skill tracker text.",
+        "Use short phrases for chips and concise proof points.",
+        "Do not invent metrics, certifications, employers, tools, or dates.",
+      ],
+    },
+    {
+      key: "interview_prep",
+      label: "interview prep page",
+      value: baseline.interview_prep,
+      counts: {
+        about_me: ABOUT_ME_COUNT,
+        stories: STORY_COUNT,
+        questions: QUESTION_COUNT,
+      },
+      instructions: [
+        "Rewrite one interview-prep page only.",
+        "Stories must be prompts grounded in supplied work history, not new claims.",
+        "Keep every line short enough for a one-page interview sheet.",
+      ],
+    },
+    {
+      key: "company_role_brief",
+      label: "company and role brief page",
+      value: baseline.company_role_brief,
+      counts: {
+        about_company: COMPANY_FACT_COUNT,
+        role_mission: ROLE_MISSION_COUNT,
+        key_responsibilities: RESPONSIBILITY_COUNT,
+        what_they_are_looking_for: REQUIREMENT_COUNT,
+        why_join: WHY_JOIN_COUNT,
+      },
+      instructions: [
+        "Rewrite one company-and-role brief page only.",
+        "Use the job posting first. Use public company context only when clearly supported.",
+        "If company facts are uncertain, write job-derived facts instead of guessing.",
+      ],
+      allowWeb: true,
+    },
+    {
+      key: "profile_cards",
+      label: "profile cards",
+      value: baseline.profile_cards,
+      counts: {},
+      instructions: [
+        "Rewrite only the interviewer/interviewee profile cards.",
+        "Use Hiring Team when a named interviewer is not clearly supported.",
+        "Do not invent biography details for an interviewer.",
+      ],
+      allowWeb: true,
+    },
+    {
+      key: "references",
+      label: "reference placeholders",
+      value: baseline.references,
+      counts: { items: REFERENCE_COUNT },
+      instructions: [
+        "Return only reference placeholders unless the candidate explicitly supplied reference details.",
+        "Do not invent names, employers, emails, phone numbers, or relationships.",
+      ],
+    },
+  ];
+
+  const output = {
+    company: baseline.company,
+    role: baseline.role,
+    output_file_label: baseline.output_file_label,
+    page_1: baseline.page_1,
+    skill_tracker: baseline.skill_tracker,
+    interview_prep: baseline.interview_prep,
+    company_role_brief: baseline.company_role_brief,
+    profile_cards: baseline.profile_cards,
+    references: baseline.references,
+    match_rationale: baseline.match_rationale,
+    research_sources: [],
+  };
+
+  for (const task of sectionTasks) {
+    output[task.key] = await callOpenRouterSection(context, task);
+  }
+  return output;
 }
 
 function noteSourceHash(note) {
@@ -1086,27 +1198,84 @@ function buildPrompt(input, revisionInstruction) {
   return [systemPrompt, JSON.stringify(userPrompt, null, 2)];
 }
 
-async function callOpenRouter(systemPrompt, userPrompt) {
+function packetPromptContext(input, revisionInstruction, baseline) {
+  return {
+    prompt_version: PROMPT_VERSION,
+    candidate_input: {
+      fullName: input.fullName,
+      email: input.email,
+      phone: input.phone,
+      location: input.location,
+      targetRole: input.targetRole,
+      workHistory: input.workHistory,
+      notes: input.notes,
+    },
+    job_description_or_posting: input.jobPost,
+    revision_instruction: revisionInstruction || "",
+    inferred_company: baseline.company,
+    inferred_role: baseline.role,
+    strict_document_rules: [
+      "The Word template owns all styling, color, layout, page breaks, bullets, tables, and images.",
+      "Return text values only. Never request a color change or structural change.",
+      "Use only candidate facts found in candidate_input.",
+      "Do not invent degrees, certifications, exact dates, software systems, employers, metrics, references, or interviewer biography.",
+      "Use placeholders for unknown private details.",
+      "Keep text compact so it fits the fixed template slots.",
+      "Use ASCII punctuation where possible.",
+    ],
+  };
+}
+
+async function callOpenRouterSection(context, task) {
+  const systemPrompt = [
+    "You are a careful resume packet editor.",
+    "Return strict JSON only for the requested section.",
+    "You may rewrite text, but the DOCX template controls all layout and styling.",
+    "Never invent candidate facts.",
+  ].join(" ");
+  const userPrompt = {
+    section: task.key,
+    label: task.label,
+    instructions: task.instructions,
+    exact_counts: task.counts,
+    input_context: context,
+    current_safe_draft: task.value,
+    output_schema_for_this_section: outputSchema()[task.key],
+  };
+  const response = await callOpenRouterJson(systemPrompt, JSON.stringify(userPrompt, null, 2), {
+    allowWeb: task.allowWeb === true,
+    maxTokens: 2200,
+  });
+  return response?.[task.key] && typeof response[task.key] === "object" ? response[task.key] : response;
+}
+
+function openRouterPacketModel() {
+  return process.env.OPENROUTER_PACKET_MODEL || process.env.OPENROUTER_MODEL || DEFAULT_PACKET_MODEL;
+}
+
+async function callOpenRouterJson(systemPrompt, userPrompt, options = {}) {
   const payload = {
-    model: process.env.OPENROUTER_MODEL || "openrouter/auto",
+    model: openRouterPacketModel(),
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
     ],
-    temperature: 0.3,
-    max_tokens: 7000,
+    temperature: 0.18,
+    max_tokens: options.maxTokens || 2600,
     response_format: { type: "json_object" },
-    tools: [
+  };
+  if (options.allowWeb) {
+    payload.tools = [
       {
         type: "openrouter:web_search",
         parameters: {
-          max_results: 5,
-          max_total_results: 10,
+          max_results: 3,
+          max_total_results: 5,
           search_context_size: "low",
         },
       },
-    ],
-  };
+    ];
+  }
   const raw = await postOpenRouter(payload).catch(async (error) => {
     const message = String(error.message || "");
     const fallback = JSON.parse(JSON.stringify(payload));
@@ -1163,7 +1332,7 @@ function parseJsonObject(text) {
 
 function localResponseFromInput(input, revisionInstruction) {
   const job = extractJobContext(input.jobPost, input.targetRole);
-  const role = input.targetRole || job.role || "Target Role";
+  const role = cleanRoleLabel(input.targetRole || job.role || "Target Role");
   const company = job.company || "Target Company";
   const skills = inferSkills(input, job);
   const refs = defaultReferences();
@@ -1365,14 +1534,14 @@ async function buildDocx(response, input) {
   updateImageAltText(dom, response, input);
 
   let updatedXml = new XMLSerializer().serializeToString(dom);
-  updatedXml = replaceAccent(updatedXml, SOURCE_ACCENT_HEX, sanitizeHex(input.accentHex || DEFAULT_ACCENT_HEX));
+  updatedXml = replaceAccent(updatedXml, SOURCE_ACCENT_HEX, DEFAULT_ACCENT_HEX);
   updatedXml = scrubSourceTemplateTermsXml(updatedXml, response, input);
   scanLeftoversXml(updatedXml, response, input);
   zip.file(xmlPath, updatedXml);
 
   const modifiedDom = new DOMParser().parseFromString(updatedXml, "application/xml");
   const relTargets = await imageTargetsFromDocument(zip, relsPath, modifiedDom);
-  const accent = sanitizeHex(input.accentHex || DEFAULT_ACCENT_HEX);
+  const accent = DEFAULT_ACCENT_HEX;
   const interviewer = response.profile_cards.interviewer || {};
   const interviewee = response.profile_cards.interviewee || {};
   const replacementImages = [
@@ -1563,22 +1732,46 @@ function removeEmbeddedTrackerParagraph(body) {
 
 function ensureSectionPageBreaks(dom, body, response) {
   const targets = new Set([
-    asText(response.interview_prep?.footer),
+    asText(response.interview_prep?.title, "Interview Reference Sheet"),
+    asText(response.company_role_brief?.about_heading, `About ${response.company || "Company"}`),
+    asText(response.profile_cards?.interviewer?.section_title, "Interviewer"),
     asText(response.references?.heading, "References"),
   ]);
   for (const paragraph of directChildren(body, "p")) {
     const text = paragraphText(paragraph).trim();
     if (targets.has(text)) {
-      const breakParagraph = dom.createElementNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "w:p");
-      const run = dom.createElementNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "w:r");
-      const br = dom.createElementNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "w:br");
-      br.setAttribute("w:type", "page");
-      run.appendChild(br);
-      breakParagraph.appendChild(run);
-      body.insertBefore(breakParagraph, paragraph);
+      insertPageBreakBefore(dom, body, paragraph);
       targets.delete(text);
     }
   }
+}
+
+function insertPageBreakBefore(dom, body, paragraph) {
+  const previous = previousElementSibling(paragraph);
+  if (hasPageBreak(paragraph) || hasPageBreak(previous)) return;
+  const breakParagraph = dom.createElementNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "w:p");
+  const run = dom.createElementNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "w:r");
+  const br = dom.createElementNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "w:br");
+  br.setAttribute("w:type", "page");
+  run.appendChild(br);
+  breakParagraph.appendChild(run);
+  body.insertBefore(breakParagraph, paragraph);
+}
+
+function previousElementSibling(node) {
+  for (let current = node?.previousSibling; current; current = current.previousSibling) {
+    if (current.nodeType === 1) return current;
+  }
+  return null;
+}
+
+function hasPageBreak(paragraph) {
+  if (!paragraph) return false;
+  const nodes = paragraph.getElementsByTagName("*");
+  for (let i = 0; i < nodes.length; i += 1) {
+    if (nodes[i].localName === "br" && nodes[i].getAttribute("w:type") === "page") return true;
+  }
+  return false;
 }
 
 function updateImageAltText(dom, response, input) {
@@ -1813,12 +2006,25 @@ function normalizeInput(value) {
     phone: cleanBoundedString(value.phone, 80),
     location: cleanBoundedString(value.location, 180),
     targetRole: cleanBoundedString(value.targetRole, 180),
-    jobPost: clipText(asText(value.jobPost), MAX_TEXT),
-    workHistory: clipText(asText(value.workHistory), MAX_TEXT),
-    notes: clipText(asText(value.notes), 6000),
-    accentHex: value.accentHex ? sanitizeHex(value.accentHex) : DEFAULT_ACCENT_HEX,
+    jobPost: clipMultilineText(value.jobPost, MAX_TEXT),
+    workHistory: clipMultilineText(value.workHistory, MAX_TEXT),
+    notes: clipMultilineText(value.notes, 6000),
+    accentHex: DEFAULT_ACCENT_HEX,
   };
   return input;
+}
+
+function clipMultilineText(value, limit) {
+  const text = asText(value)
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!limit || text.length <= limit) return text;
+  return text.slice(0, limit).replace(/\s+\S*$/, "").trim();
 }
 
 function titleFromInput(input) {
@@ -1850,10 +2056,10 @@ function publicPackage(pkg) {
 
 function extractJobContext(jobText, targetRole) {
   const lines = cleanJobLines(jobText);
-  const role = targetRole || lines[0] || "Target Role";
+  const role = cleanRoleLabel(targetRole || lines[0] || "Target Role");
   let company = "Target Company";
   for (const candidate of lines.slice(1, 7)) {
-    if (!/\$|\b\d{5}\b|, [A-Z]{2}\b|remote|full-time|part-time/i.test(candidate) && candidate.length <= 90) {
+    if (!/\$|\b\d{5}\b|, [A-Z]{2}\b|remote|full-time|part-time|responsib|require|skill|job post/i.test(candidate) && candidate.length <= 90) {
       company = candidate;
       break;
     }
@@ -1867,9 +2073,11 @@ function cleanJobLines(text) {
   return asText(text)
     .replace(/&nbsp;/gi, " ")
     .split(/\r?\n+/)
-    .map((line) => line.replace(/\s+/g, " ").trim())
+    .flatMap((line) => line.split(/[•●]/g))
+    .map((line) => line.replace(/\bSJE\s*\d+(?:\.\d+)*\b/gi, " ").replace(/\s+/g, " ").trim())
     .filter(Boolean)
-    .filter((line) => !["profile insights", "job details", "full job description"].includes(line.toLowerCase()));
+    .filter((line) => !["profile insights", "job details", "full job description"].includes(line.toLowerCase()))
+    .filter((line) => !/^job post(?:ing)?\b/i.test(line));
 }
 
 function inferSkills(input, job) {
@@ -1907,13 +2115,16 @@ function inferSkills(input, job) {
 }
 
 function skillValue(skill, job) {
-  const roleTerms = job.lines.slice(0, 12).join(" ");
-  const phrase = roleTerms ? `role-specific application, practical examples, ${clipText(roleTerms, 52)}` : "practical examples, role-specific application, reliable follow-through";
-  return clipText(`${phrase}`, 120);
+  const source = job.requirements.concat(job.responsibilities, job.lines).find((line) => {
+    const firstWord = asText(skill).split(/\s+/)[0];
+    return firstWord && new RegExp(`\\b${escapeRegExp(firstWord)}\\b`, "i").test(line);
+  });
+  const detail = cleanEvidenceLine(source || "practical application, reliable follow-through, and clear communication");
+  return clipText(detail, 118);
 }
 
 function buildExperienceBullets(input, role, company) {
-  const lines = asText(input.workHistory).split(/\r?\n+/).map((line) => line.trim()).filter(Boolean);
+  const lines = candidateEvidenceLines(input.workHistory);
   const seeds = [
     `Tailored background toward ${role}`,
     `Connected experience to ${company}'s needs`,
@@ -1939,11 +2150,51 @@ function buildStories(input, role) {
     "Learning curve",
     "Follow-through",
   ];
-  const lines = asText(input.workHistory).split(/\r?\n+/).map((line) => line.trim()).filter(Boolean);
+  const lines = candidateEvidenceLines(input.workHistory);
   return themes.map((title, index) => ({
     title,
     summary: clipText(lines[index] || `Prepare a concise example connected to the ${role} posting.`, 70),
   }));
+}
+
+function cleanRoleLabel(value) {
+  return clipText(
+    asText(value, "Target Role")
+      .replace(/\s*[-|:]\s*job post(?:ing)?\b.*$/i, "")
+      .replace(/\bSJE\s*\d+(?:\.\d+)*\b/gi, "")
+      .replace(/\s+/g, " ")
+      .trim(),
+    80,
+    "Target Role",
+  );
+}
+
+function candidateEvidenceLines(text) {
+  return asText(text)
+    .replace(/&nbsp;/gi, " ")
+    .split(/\r?\n+|[•●]/)
+    .map(cleanEvidenceLine)
+    .filter(Boolean)
+    .filter((line) => !isResumeHeaderLine(line))
+    .slice(0, 24);
+}
+
+function cleanEvidenceLine(line) {
+  return asText(line)
+    .replace(/\bSJE\s*\d+(?:\.\d+)*\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[*-]\s*/, "")
+    .trim();
+}
+
+function isResumeHeaderLine(line) {
+  const value = asText(line);
+  if (!value) return true;
+  if (/@|linkedin\.com|https?:\/\/|www\./i.test(value)) return true;
+  if (/\b\d{3}[-.)\s]?\d{3}[-.\s]?\d{4}\b/.test(value) && value.length < 180) return true;
+  if (/^[A-Z][A-Za-z' -]+,\s*[A-Z]{2}\b/.test(value)) return true;
+  if (/^(name|email|phone|location|address|summary|objective)\b\s*:/i.test(value)) return true;
+  return false;
 }
 
 function defaultReferences() {

@@ -60,6 +60,37 @@ describe("ResumeDoc generator", () => {
 
     expect(xml).not.toMatch(/Joseph|Joe Rice|System Administrator|IT Generalist|Michael Johnson/i);
   });
+
+  it("keeps template orange and enforces major section page breaks", async () => {
+    const input = sampleInput();
+    const response = api.validateResponse(api.localResponseFromInput(input), input);
+    const output = await api.buildDocx(response, input);
+    const zip = await JSZip.loadAsync(output.docx);
+    const xml = await zip.file("word/document.xml").async("string");
+
+    expect(xml).toContain('w:fill="E97132"');
+    expect(xml).not.toContain('w:fill="2563EB"');
+    expect((xml.match(/w:type="page"/g) || [])).toHaveLength(4);
+  });
+
+  it("does not reuse resume headers or noisy role labels in fallback text", () => {
+    const input = api.normalizeInput({
+      ...sampleInput(),
+      targetRole: "Senior IT Systems Engineer - job post SJE 3.4",
+      workHistory: [
+        "Jane Applicant Minneapolis, MN 555-555-5555 jane@example.com linkedin.com/in/jane",
+        "Managed ticket queues and customer communication for a support team.",
+        "Improved weekly reporting for leadership.",
+      ].join("\n"),
+    });
+    const response = api.validateResponse(api.localResponseFromInput(input), input);
+    const text = JSON.stringify(response);
+
+    expect(response.role).toBe("Senior IT Systems Engineer");
+    expect(text).not.toContain("SJE 3.4");
+    expect(text).not.toContain("jane@example.com linkedin.com");
+    expect(response.page_1.experience_bullets[0].detail).toContain("Managed ticket queues");
+  });
 });
 
 describe("ResumeDoc notes and Jobel safety helpers", () => {
