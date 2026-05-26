@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
 import functions from "./index.js";
 
 const api = functions._test;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, "..");
+const referenceDir = path.join(repoRoot, "reference files");
 const originalFetch = globalThis.fetch;
 const originalAiBrainToken = process.env.AI_BRAIN_API_TOKEN;
 const originalOpenRouterKey = process.env.OPENROUTER_API_KEY;
@@ -36,6 +42,10 @@ function sampleInput() {
     ].join("\n"),
     notes: "Keep it practical and role-specific.",
   });
+}
+
+async function docxText(relativePath) {
+  return api.extractDocxText(fs.readFileSync(path.join(repoRoot, relativePath)));
 }
 
 describe("ResumeDoc generator", () => {
@@ -139,6 +149,67 @@ describe("ResumeDoc generator", () => {
     expect(context.source_chunks.filter((chunk) => chunk.type === "work_history").map((chunk) => chunk.text).join("\n")).not.toContain("jane@example.com");
   });
 
+  it("normalizes the Joseph fixture before it reaches packet prompts", async () => {
+    const text = await docxText("reference files/Joseph Rice - Systems Administrator.docx");
+    const source = api.normalizeCandidateSource(text, {
+      fullName: "Joseph Rice",
+      email: "jmjrice94@gmail.com",
+      phone: "2623487425",
+      location: "Saint Paul, Minnesota",
+    });
+    const evidenceText = source.workEvidence.join("\n");
+    const discardedReasons = source.discarded.map((entry) => entry.reason);
+
+    expect(discardedReasons).toContain("generated_packet_boilerplate");
+    expect(evidenceText).not.toMatch(/Role-Focused Resume Packet|Candidate-provided work history|Target Company/i);
+    expect(evidenceText).not.toMatch(/using the candidate-provided resume details|Senior IT Systems Engineer.*job post|SJE/i);
+    expect(evidenceText).not.toMatch(/jmjrice94@gmail\.com|2623487425|linkedin\.com/i);
+  });
+
+  it("keeps fallback output source-backed or explicitly conservative for the Joseph fixture", async () => {
+    const text = await docxText("reference files/Joseph Rice - Systems Administrator.docx");
+    const input = api.normalizeInput({
+      fullName: "Joseph Rice",
+      email: "jmjrice94@gmail.com",
+      phone: "2623487425",
+      location: "Saint Paul, Minnesota",
+      targetRole: "Systems Administrator",
+      jobPost: [
+        "Senior IT Systems Engineer",
+        "SJE",
+        "Plymouth or New Hope, MN",
+        "Hybrid | Full-Time | Monday - Friday, 8:00 AM - 5:00 PM",
+      ].join("\n"),
+      workHistory: text,
+    });
+    const source = api.normalizeCandidateSource(input.workHistory, input);
+    const response = api.validateResponse(api.localResponseFromInput(input), input);
+    const outputText = JSON.stringify(response);
+    const bulletDetails = response.page_1.experience_bullets.map((bullet) => bullet.detail);
+
+    expect(outputText).not.toMatch(/Role-Focused Resume Packet|Candidate-provided work history|Target Company/i);
+    expect(outputText).not.toMatch(/using the candidate-provided resume details|Senior IT Systems Engineer.*job post|SJE\s*\d/i);
+    expect(response.page_1.skill_items.map((item) => item.value).join("\n")).not.toMatch(/Plymouth|New Hope|Hybrid|Monday|8:00 AM/i);
+    expect(bulletDetails.every((detail) => detail.includes("Confirm") || source.workEvidence.includes(detail))).toBe(true);
+  });
+
+  it("flags the bad-output documents as generated packet source issues", async () => {
+    const badDir = path.join(referenceDir, "Bad Outputs");
+    const files = fs.readdirSync(badDir).filter((file) => file.endsWith(".docx"));
+    expect(files.length).toBeGreaterThan(0);
+
+    for (const file of files) {
+      const text = await api.extractDocxText(fs.readFileSync(path.join(badDir, file)));
+      const issues = api.detectSourceQualityIssues(text);
+      expect(issues).toContain("generated_packet_scaffolding");
+      expect(issues.some((issue) => [
+        "generic_candidate_detail_filler",
+        "copied_job_post_header_or_noise",
+        "contact_header_used_as_candidate_evidence",
+      ].includes(issue))).toBe(true);
+    }
+  });
+
   it("sends targeted chunks and carries compact memory between OpenRouter section prompts", async () => {
     process.env.OPENROUTER_API_KEY = "test-openrouter-key";
     const prompts = [];
@@ -176,6 +247,9 @@ describe("ResumeDoc generator", () => {
     expect(prompts).toHaveLength(6);
     expect(prompts[0].input_context.source_chunks.map((chunk) => chunk.type)).toContain("work_history");
     expect(prompts[3].input_context.source_chunks.some((chunk) => chunk.type === "work_history")).toBe(false);
+    expect(prompts[0].instructions.join(" ")).toContain("Faithfully reformulate");
+    expect(prompts[0].negative_examples_to_avoid.join(" ")).toContain("Contact/header text");
+    expect(prompts[0].input_context.strict_document_rules.join(" ")).toContain("job-post text into candidate history");
     expect(prompts[1].input_context.working_memory.section_summaries).toContain("page_1: page_1 memory");
     expect(response.generation_memory.section_summaries).toContain("references: references memory");
   });
