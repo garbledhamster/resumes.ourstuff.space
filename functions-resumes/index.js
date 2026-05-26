@@ -40,6 +40,12 @@ const REQUIREMENT_COUNT = 7;
 const WHY_JOIN_COUNT = 4;
 const REFERENCE_COUNT = 3;
 const ACTIVITY_LIMIT = 80;
+const US_STATE_ABBREVIATIONS = new Set([
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS",
+  "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY",
+  "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV",
+  "WI", "WY", "DC",
+]);
 const MIN_SECTION_OUTPUT_TOKENS = 700;
 const MAX_SECTION_OUTPUT_TOKENS = 2600;
 const MAX_TEXT = 70000;
@@ -330,7 +336,7 @@ app.post("/api/packages/:id/confirm-payment", requireActor, asyncHandler(async (
 app.post("/api/packages/:id/generate", requireActor, asyncHandler(async (req, res) => {
   const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
   const unlockedPkg = await requireUnlockedPackage(req, pkg);
-  const extraDirection = cleanBoundedString(req.body?.extraDirection, 6000);
+  const extraDirection = clipMultilineText(req.body?.extraDirection, 6000);
   try {
     await markGenerationStarted(pkg.id, "Jobel is gathering your saved resume details, job post, and package notes.");
     const input = await loadPackageInputForUse(req.actor.uid, pkg, { extraDirection });
@@ -891,7 +897,7 @@ function normalizeResumeNote(raw = {}) {
     appId: cleanBoundedString(raw.appId, 80) || RESUMEDOC_APP_ID,
     packageId: cleanBoundedString(raw.packageId, 160),
     title: cleanBoundedString(raw.title, 120),
-    body: clipText(asText(raw.body), 12000),
+    body: clipMultilineText(raw.body, 12000),
     createdAt: cleanBoundedString(raw.createdAt, 80),
     updatedAt: cleanBoundedString(raw.updatedAt, 80),
     metadata: {
@@ -1214,7 +1220,7 @@ async function saveJobPostingReference(uid, { noteId, packageId, title, body, no
     appId: RESUMEDOC_APP_ID,
     packageId: packageId || "",
     title: cleanBoundedString(title, 120) || "Job posting reference",
-    body: clipText(body, MAX_TEXT),
+    body: clipMultilineText(body, MAX_TEXT),
     createdAt: now,
     updatedAt: now,
     metadata: {
@@ -1353,6 +1359,9 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction, opt
         "Faithfully reformulate the first resume page only.",
         "Use actual candidate evidence from workHistory. Do not use contact/header lines as accomplishments.",
         "Every candidate claim must trace to selected work_history chunks or candidate identity fields.",
+        "Relevant Experience must describe the candidate's prior work history, employers, projects, education, and interests. Never label the candidate's experience with the target job-post company.",
+        "Use the job posting only to choose which candidate facts are relevant; do not copy the posting into candidate experience.",
+        "Set education_items and interest_items only from candidate-supplied material. Return empty arrays when none are supplied or clearly relevant.",
         "Use candidate identity only where the schema explicitly needs identity. Do not put names, phone numbers, emails, or locations in summary, skill values, or experience bullets.",
         "Do not use copied job-post headers, generated packet boilerplate, or placeholders as candidate evidence.",
         "Return concise text that will fit existing Word template paragraphs.",
@@ -1646,9 +1655,9 @@ async function buildJobelPrompt({ message, input, packageInfo, notes }) {
 function compactJobelResumeContext(input = {}) {
   return JSON.stringify({
     targetRole: input.targetRole || "",
-    jobPost: clipText(input.jobPost || "", 6000),
-    workHistory: clipText(input.workHistory || "", 8000),
-    notes: clipText(input.notes || "", 2000),
+    jobPost: clipMultilineText(input.jobPost || "", 6000),
+    workHistory: clipMultilineText(input.workHistory || "", 8000),
+    notes: clipMultilineText(input.notes || "", 2000),
   });
 }
 
@@ -1809,7 +1818,7 @@ function normalizeWorkHistoryProfile(raw = {}) {
     id: cleanBoundedString(raw.id, 160) || WORK_HISTORY_PROFILE_ID,
     owner: cleanBoundedString(raw.owner, 160),
     appId: cleanBoundedString(raw.appId, 80) || RESUMEDOC_APP_ID,
-    body: clipText(asText(raw.body), MAX_TEXT),
+    body: clipMultilineText(raw.body, MAX_TEXT),
     sourceHash: cleanBoundedString(raw.sourceHash, 128),
     createdAt: cleanBoundedString(raw.createdAt, 80),
     updatedAt: cleanBoundedString(raw.updatedAt, 80),
@@ -2278,7 +2287,12 @@ function localResponseFromInput(input, revisionInstruction) {
         label: skill,
         value: skillValue(skill, job, candidateSource),
       })),
-      experience_bullets: buildExperienceBullets(input, role, company, workEvidence),
+      experience_title: candidateExperienceTitle(input, role),
+      experience_organization: candidateOrganizationLine(input),
+      experience_relevance: `Relevant to ${role}`,
+      experience_bullets: buildExperienceBullets(input, role, job, workEvidence),
+      education_items: extractRelevantEducation(input, job, role),
+      interest_items: extractRelevantInterests(input, job, role),
     },
     skill_tracker: {
       headline: `${role} Match Tracker`,
@@ -2624,15 +2638,17 @@ function applyPageOne(table, topParagraphs, response, input) {
   });
 
   setParagraphText(experienceParas[1], clipText(page.experience_section_title || "RELEVANT EXPERIENCE", 60).toUpperCase());
-  setParagraphText(experienceParas[3], input.targetRole || "Target Role");
-  setParagraphText(experienceParas[4], asText(response.company, "Target Employer"));
-  setParagraphText(experienceParas[5], "Source-backed highlights");
+  const experienceContext = pageOneExperienceContext(input, response);
+  setParagraphText(experienceParas[3], experienceContext.title);
+  setParagraphText(experienceParas[4], experienceContext.organizationLine);
+  setParagraphText(experienceParas[5], experienceContext.relevanceLine);
   page.experience_bullets.forEach((bullet, offset) => {
     setParagraphText(experienceParas[7 + offset], `${clipText(bullet.lead, 95)} ${clipText(bullet.detail, 160)}`);
   });
-  setParagraphText(experienceParas[15], "ADDITIONAL CONTEXT");
-  setParagraphText(experienceParas[17], "Application Focus");
-  setParagraphText(experienceParas[18], clipText(response.match_rationale?.[0] || input.notes || "Tie each claim to verified source evidence before submitting.", 180));
+  const supportBlock = pageOneSupportBlock(input, response);
+  setParagraphText(experienceParas[15], supportBlock.heading);
+  setParagraphText(experienceParas[17], supportBlock.title);
+  setParagraphText(experienceParas[18], supportBlock.detail);
 
   const documentFields = [
     input.fullName || "[Full Name]",
@@ -2642,6 +2658,41 @@ function applyPageOne(table, topParagraphs, response, input) {
   for (let i = 0; i < Math.min(3, topParagraphs.length); i += 1) {
     setParagraphText(topParagraphs[i], documentFields[i]);
   }
+}
+
+function pageOneExperienceContext(input, response) {
+  const role = cleanRoleLabel(input.targetRole || response.role || "Target Role");
+  const title = candidateExperienceTitle(input, role);
+  const organizationLine = candidateOrganizationLine(input);
+  return {
+    title,
+    organizationLine,
+    relevanceLine: `Relevant to ${role}`,
+  };
+}
+
+function pageOneSupportBlock(input, response) {
+  const role = cleanRoleLabel(input.targetRole || response.role || "Target Role");
+  const job = extractJobContext(input.jobPost, role);
+  const education = extractRelevantEducation(input, job, role);
+  const interests = extractRelevantInterests(input, job, role);
+  const details = [];
+  if (education.length) details.push(`Education: ${education.slice(0, 2).join("; ")}`);
+  if (interests.length) details.push(`Interests: ${interests.slice(0, 2).join("; ")}`);
+  if (!details.length) return { heading: "", title: "", detail: "" };
+  return {
+    heading: education.length && interests.length
+      ? "RELEVANT EDUCATION & INTERESTS"
+      : education.length
+        ? "RELEVANT EDUCATION"
+        : "RELEVANT INTERESTS",
+    title: education.length && interests.length
+      ? "Education & interests"
+      : education.length
+        ? "Education"
+        : "Interests",
+    detail: clipText(details.join(" | "), 220),
+  };
 }
 
 function applyInterviewPrep(paragraphs, response) {
@@ -3248,7 +3299,7 @@ function inferCompanyFromJobHeader(lines, role) {
   for (const line of lines.slice(0, 4)) {
     const header = asText(line).split(/\s[-|]\s/)[0];
     const acronymMatches = header.match(/\b[A-Z][A-Z0-9&]{1,10}\b/g) || [];
-    const candidates = acronymMatches.filter((value) => !["IT", "AM", "PM", "HR", "FT", "PT"].includes(value));
+    const candidates = acronymMatches.filter((value) => !["IT", "AM", "PM", "HR", "FT", "PT"].includes(value) && !US_STATE_ABBREVIATIONS.has(value));
     if (candidates.length) return candidates[candidates.length - 1];
     const compactRole = normalizeComparable(role);
     const compactHeader = normalizeComparable(header);
@@ -3258,6 +3309,11 @@ function inferCompanyFromJobHeader(lines, role) {
     }
   }
   return "";
+}
+
+function isAddressLikeLine(line) {
+  const value = asText(line);
+  return /\b\d{5}(?:-\d{4})?\b/.test(value) || /,\s*[A-Z]{2}\b/.test(value);
 }
 
 function normalizeComparable(value) {
@@ -3328,21 +3384,204 @@ function keywordMatchesLine(skill, line) {
   return Boolean(firstWord && new RegExp(`\\b${escapeRegExp(firstWord)}\\b`, "i").test(line));
 }
 
-function buildExperienceBullets(input, role, company, workEvidence = candidateEvidenceLines(input.workHistory)) {
-  const lines = workEvidence;
-  const seeds = [
-    `Position ${role} around verified background`,
-    `Connect source evidence to ${company}'s needs`,
-    "Clarify communication examples",
-    "Confirm operational follow-through",
-    "Map tools, systems, or procedures",
-    "Prepare problem-solving examples",
-    "Confirm interview-ready details",
+function candidateExperienceTitle(input, role) {
+  const titles = extractCandidateJobTitles(input);
+  if (titles.length) return titles.slice(0, 2).join(" & ");
+  const text = `${input.workHistory || ""}\n${input.notes || ""}`;
+  if (/\barchitect\b|\bengineer\b|\bapps?\b|\bsoftware\b/i.test(text) && /software|system|it|engineer|developer|technical|app/i.test(role)) {
+    return "App Architecture & Engineering";
+  }
+  if (/\bretail\b/i.test(text) && /\baccounting\b/i.test(text)) return "Retail & Accounting Support";
+  if (/\boffice\b|\badministrative\b/i.test(text)) return "Office & Administrative Support";
+  return "Relevant Work History";
+}
+
+function candidateOrganizationLine(input) {
+  const organizations = extractCandidateOrganizations(input.workHistory || input.notes || "", input);
+  return organizations.length ? organizations.slice(0, 3).join(" | ") : "Resume work history";
+}
+
+function extractCandidateJobTitles(input) {
+  const titles = [];
+  for (const line of candidateSupplementLines(input)) {
+    const atMatch = line.match(/^(.{3,60}?)\s+at\s+.{2,90}$/i);
+    if (atMatch) titles.push(atMatch[1]);
+    const roleMatch = line.match(/\b(office assistant|systems? administrator|systems? engineer|it engineer|it generalist|retail lead|lead associate|accounting support|customer support|technical support|project coordinator|operations coordinator)\b/i);
+    if (roleMatch) titles.push(roleMatch[1]);
+  }
+  return uniqueCleanList(titles.map(titleCasePhrase)).slice(0, 2);
+}
+
+function extractCandidateOrganizations(text, input = {}) {
+  const organizations = [];
+  for (const line of cleanMultilineTextForAi(text).split(/\r?\n+/).flatMap((entry) => entry.split(/\s+\|\s+/))) {
+    const value = cleanEvidenceLine(line);
+    const atMatch = value.match(/\bat\s+([A-Z][A-Za-z0-9&'. -]{2,80}?)(?:[.,;]|\s{2,}|$)/);
+    if (atMatch) organizations.push(atMatch[1]);
+    const colonMatch = value.match(/^([A-Z][A-Za-z0-9&'. -]{2,55}):\s+/);
+    if (colonMatch) organizations.push(colonMatch[1]);
+    if (/^[A-Z][A-Za-z0-9&'. -]{2,55}(?:\s+(?:Tools|Group|Company|Co\.?|LLC|Inc\.?|Auto Group|Financial|Nationwide))$/i.test(value)) {
+      organizations.push(value);
+    }
+  }
+  return uniqueCleanList(organizations.map((org) => cleanCandidateOrganization(org, input))).slice(0, 4);
+}
+
+function cleanCandidateOrganization(value, input = {}) {
+  const cleaned = asText(value)
+    .replace(/\s*\([^)]*\)\s*/g, " ")
+    .replace(/\b(?:remote|hybrid|full-time|part-time|internship|contract)\b.*$/i, "")
+    .replace(/\b\d{4}\b.*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.,;:|-]+$/g, "")
+    .trim();
+  if (cleaned.length < 3 || cleaned.length > 70) return "";
+  if (US_STATE_ABBREVIATIONS.has(cleaned.toUpperCase()) || /\b\d{5}\b/.test(cleaned)) return "";
+  if (isJobPostNoiseLine(cleaned) || isResumeHeaderLine(cleaned) || isSectionHeadingLine(cleaned)) return "";
+  if (isCommonSkillOrStoryLabel(cleaned)) return "";
+  if (/\btarget (?:company|employer|role)\b/i.test(cleaned) || /^about\s+target\b/i.test(cleaned)) return "";
+  if (cleaned.split(/\s+/).some((word) => /^[a-z]/.test(word))) return "";
+  if (/^(candidate|target|resume|work history|education|skills?|profile|job|role|responsibilities?|requirements?)\b/i.test(cleaned)) return "";
+  if (sameNormalizedText(cleaned, input.fullName) || sameNormalizedText(cleaned, input.targetRole)) return "";
+  return cleaned;
+}
+
+function isCommonSkillOrStoryLabel(value) {
+  return /^(customer service|communication|operations?|leadership|accuracy|technical tools|problem solving|organization|data (?:&|and) reporting|retail lead ownership|accounting support|skill growth|communication growth|role fit|relevant responsibility|follow-through)$/i.test(asText(value));
+}
+
+function buildExperienceBullets(input, role, job, workEvidence = candidateEvidenceLines(input.workHistory)) {
+  const lines = rankWorkEvidenceForJob(workEvidence, job, role);
+  return Array.from({ length: EXPERIENCE_BULLET_COUNT }, (_item, index) => {
+    const line = lines[index] || SOURCE_PLACEHOLDER;
+    return {
+      lead: roleRelevantLead(line, job, role, index),
+      detail: clipText(line, 180),
+    };
+  });
+}
+
+function rankWorkEvidenceForJob(workEvidence, job, role) {
+  const terms = relevantJobTerms(job, role);
+  return [...workEvidence]
+    .map((line, index) => ({
+      line,
+      index,
+      score: terms.reduce((total, term) => total + (new RegExp(`\\b${escapeRegExp(term)}\\w*`, "i").test(line) ? 1 : 0), 0),
+    }))
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((item) => item.line);
+}
+
+function relevantJobTerms(job, role) {
+  const text = [role, ...(job?.responsibilities || []), ...(job?.requirements || [])].join(" ").toLowerCase();
+  return uniqueCleanList(text.match(/[a-z][a-z]{3,}/g) || [])
+    .filter((term) => !["this", "that", "with", "from", "role", "work", "will", "candidate", "experience", "ability", "skills"].includes(term))
+    .slice(0, 20);
+}
+
+function roleRelevantLead(line, job, role, index) {
+  const value = asText(line);
+  const pairs = [
+    ["Customer service relevance", /customer|client|guest|service|support/i],
+    ["Communication relevance", /communicat|email|present|write|document/i],
+    ["Operations relevance", /operation|process|workflow|procedure|schedule|coordinate/i],
+    ["Accuracy relevance", /accur|detail|record|report|paperwork|quality|inventory/i],
+    ["Technical relevance", /system|software|network|server|app|cloud|ticket|troubleshoot|engineer/i],
+    ["Leadership relevance", /lead|manager|supervis|train|mentor|ownership/i],
+    ["Problem-solving relevance", /solve|resolved|improv|analy|root-cause|troubleshoot/i],
   ];
-  return seeds.map((lead, index) => ({
-    lead,
-    detail: clipText(lines[index] || SOURCE_PLACEHOLDER, 180),
-  }));
+  const matched = pairs.find(([, pattern]) => pattern.test(value));
+  return matched ? matched[0] : `Relevant background ${index + 1}`;
+}
+
+function extractRelevantEducation(input, job, role) {
+  const lines = candidateSupplementLines(input);
+  const educationLines = lines.filter((line) => (
+    /\b(education|degree|college|university|school|certificat|diploma|a\.?a\.?s\.?|b\.?a\.?|b\.?s\.?|m\.?a\.?|m\.?s\.?|mba|ged)\b/i.test(line)
+  ));
+  return uniqueCleanList(educationLines.map(cleanSupportLine).filter(Boolean))
+    .filter((line) => isSupplementRelevant(line, job, role, true))
+    .slice(0, 2);
+}
+
+function extractRelevantInterests(input, job, role) {
+  const lines = candidateSupplementLines(input);
+  const interestLines = lines.filter((line) => (
+    isInterestSourceLine(line)
+  ));
+  return uniqueCleanList(interestLines.map(cleanSupportLine).filter(Boolean))
+    .filter((line) => isSupplementRelevant(line, job, role, false))
+    .slice(0, 2);
+}
+
+function isInterestSourceLine(line) {
+  const value = asText(line);
+  if (/\b(interest|hobb|personal project|side project|outside work|craft|sewing|maker|volunteer)\b/i.test(value)) return true;
+  if (/\bI\s+(?:build|built|architect|engineer|make|design)\b/i.test(value)) return true;
+  if (/\b(apps?|software)\b/i.test(value) && !/\bat\s+[A-Z][A-Za-z0-9&'. -]{2,80}/.test(value)) return true;
+  return false;
+}
+
+function candidateSupplementLines(input = {}) {
+  return cleanMultilineTextForAi([input.workHistory, input.notes].filter(Boolean).join("\n"))
+    .split(/\r?\n+|[â€¢]/)
+    .flatMap((line) => line.split(/\s+-\s+(?=[A-ZI][A-Za-z])/))
+    .map((line) => line.replace(/^[*-]\s*/, "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+function cleanSupportLine(line) {
+  const value = cleanCandidateEvidenceText(line)
+    .replace(/^(education|interests?|hobbies|personal projects?)\s*:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!value || isGeneratedPacketBoilerplate(value) || isJobPostNoiseLine(value) || isPlaceholderLine(value)) return "";
+  return clipText(value, 115);
+}
+
+function isSupplementRelevant(line, job, role, allowEducation) {
+  const value = asText(line);
+  if (!value) return false;
+  if (allowEducation && /\b(degree|college|university|school|certificat|a\.?a\.?s\.?|b\.?a\.?|b\.?s\.?|m\.?a\.?|m\.?s\.?|mba|ged)\b/i.test(value)) {
+    return true;
+  }
+  const haystack = `${role} ${(job?.responsibilities || []).join(" ")} ${(job?.requirements || []).join(" ")}`;
+  if (keywordOverlapCount(value, haystack) > 0) return true;
+  if (/\b(apps?|software|engineer|architect|systems?)\b/i.test(value) && /\b(it|technical|software|systems?|engineer|developer|app)\b/i.test(haystack)) return true;
+  if (/\b(sewing|craft|maker)\b/i.test(value) && /\b(detail|accuracy|quality|patient|careful|inventory|records?)\b/i.test(haystack)) return true;
+  return false;
+}
+
+function keywordOverlapCount(left, right) {
+  const rightTerms = new Set((asText(right).toLowerCase().match(/[a-z][a-z]{3,}/g) || []));
+  return uniqueCleanList(asText(left).toLowerCase().match(/[a-z][a-z]{3,}/g) || [])
+    .filter((term) => rightTerms.has(term)).length;
+}
+
+function uniqueCleanList(items) {
+  const seen = new Set();
+  const result = [];
+  for (const item of items) {
+    const value = asText(item).replace(/\s+/g, " ").trim();
+    const key = value.toLowerCase();
+    if (value && !seen.has(key)) {
+      seen.add(key);
+      result.push(value);
+    }
+  }
+  return result;
+}
+
+function titleCasePhrase(value) {
+  return asText(value)
+    .toLowerCase()
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase())
+    .replace(/\bIt\b/g, "IT")
+    .replace(/\bAi\b/g, "AI")
+    .replace(/\bUi\b/g, "UI")
+    .replace(/\bUx\b/g, "UX");
 }
 
 function buildTransferableEvidence(workEvidence) {
@@ -3606,7 +3845,12 @@ function outputSchema() {
       experience_section_title: "Uppercase section heading.",
       summary: "One compact paragraph, 60 to 95 words.",
       skill_items: [{ label: "Short skill label.", value: "Comma-separated skill text only." }],
+      experience_title: "Candidate-source role or experience label, never the target posting company.",
+      experience_organization: "Candidate-source employer, organization, project, or Resume work history fallback.",
+      experience_relevance: "Short line explaining target-role relevance.",
       experience_bullets: [{ lead: "Opening phrase.", detail: "Normal detail continuing the same sentence." }],
+      education_items: ["Relevant education from candidate material only, or empty array."],
+      interest_items: ["Relevant interests or hobbies from candidate material only, or empty array."],
     },
     skill_tracker: {
       headline: "Short title for the full-page visual.",

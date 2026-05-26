@@ -26,7 +26,11 @@ admin controls.
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\github-ready.ps1 -UiChanged
 ```
 
-Reports are written to `artifacts\frontend-validation`.
+Reports are written to `artifacts\frontend-validation`. When all checks pass,
+the script stages non-ignored repo changes, commits them with a validation note,
+and pushes the current branch. Use `-CommitMessage "Your message"` to choose the
+commit subject, `-NoPush` to commit without pushing, or `-SkipPublish` to run
+validation only.
 
 The ready check also runs a no-cost DOCX smoke harness that builds three
 different packets and extracts their text for inspection:

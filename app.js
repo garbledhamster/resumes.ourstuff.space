@@ -277,7 +277,7 @@ function setPackageInput(input = {}) {
   els.targetRole.value = input.targetRole || "";
   els.jobPost.value = input.jobPost || "";
   els.workHistory.value = input.workHistory || "";
-  els.notes.value = "";
+  els.notes.value = input.notes || "";
   state.sourceRefs = {
     jobPostNoteId: input.jobPostNoteId || "",
     workHistoryProfileId: input.workHistoryProfileId || WORK_HISTORY_PROFILE_ID,

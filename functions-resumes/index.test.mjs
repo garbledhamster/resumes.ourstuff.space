@@ -77,6 +77,71 @@ describe("ResumeDoc generator", () => {
     expect(output.trackerPng.length).toBeGreaterThan(5000);
   });
 
+  it("labels relevant experience from candidate history instead of the target company", async () => {
+    const input = sampleInput();
+    const response = api.validatePacketResponse(api.localResponseFromInput(input), input);
+    const output = await api.buildDocx(response, input);
+    const text = await api.extractDocxText(output.docx);
+    const lines = text.split("\n");
+    const experienceIndex = lines.indexOf("RELEVANT EXPERIENCE");
+
+    expect(experienceIndex).toBeGreaterThan(0);
+    expect(lines[experienceIndex + 1]).toBe("Office Assistant");
+    expect(lines[experienceIndex + 2]).toBe("Example Co");
+    expect(lines[experienceIndex + 2]).not.toBe("Acme Company");
+    expect(text).not.toContain("ADDITIONAL CONTEXT");
+    expect(text).not.toContain("Application Focus");
+  });
+
+  it("uses relevant education and interests in the page-one bottom block when supplied", async () => {
+    const input = api.normalizeInput({
+      fullName: "Alex Builder",
+      email: "alex@example.com",
+      phone: "555-555-2222",
+      location: "Madison, WI",
+      targetRole: "Software Support Engineer",
+      jobPost: [
+        "Software Support Engineer",
+        "Example Systems",
+        "Responsibilities include troubleshooting apps, documenting technical issues, and communicating with users.",
+        "Requirements include software systems experience, problem solving, and clear documentation.",
+      ].join("\n"),
+      workHistory: [
+        "Technical Support Specialist at Builder Apps. Troubleshot app issues and documented fixes for users.",
+        "Education: A.A.S., Computer Support Specialist, Gateway Technical College.",
+      ].join("\n"),
+      notes: "Interests: I architect and engineer apps to understand better support workflows.",
+    });
+    const response = api.validatePacketResponse(api.localResponseFromInput(input), input);
+    const output = await api.buildDocx(response, input);
+    const text = await api.extractDocxText(output.docx);
+
+    expect(text).toContain("RELEVANT EDUCATION & INTERESTS");
+    expect(text).toContain("A.A.S., Computer Support Specialist");
+    expect(text).toContain("architect and engineer apps");
+  });
+
+  it("does not infer a state abbreviation as the job-post company", () => {
+    const input = api.normalizeInput({
+      ...sampleInput(),
+      targetRole: "Bingo Worker",
+      jobPost: [
+        "Bingo Worker",
+        "Anoka Area Ice Arena Charitable Gambling",
+        "Anoka, MN 55303",
+        "Responsibilities include guest service, cash handling, and accurate game records.",
+      ].join("\n"),
+      workHistory: [
+        "Harbor Freight: lead role with customer-facing retail, team support, and store operations.",
+        "Kunes: accounting support with records, paperwork, and accuracy.",
+      ].join("\n"),
+    });
+    const response = api.localResponseFromInput(input);
+
+    expect(response.company).toBe("Anoka Area Ice Arena Charitable Gambling");
+    expect(response.page_1.experience_organization).toBe("Harbor Freight | Kunes");
+  });
+
   it("scrubs source-template terms from document XML metadata", async () => {
     const input = sampleInput();
     const response = api.validateResponse(api.localResponseFromInput(input), input);
@@ -442,18 +507,36 @@ describe("ResumeDoc notes and Jobel safety helpers", () => {
     expect(note.metadata.readOnly).toBe(false);
   });
 
+  it("preserves multiline resume note bodies", () => {
+    const note = api.normalizeResumeNote({
+      id: "note-1",
+      owner: "user-1",
+      title: "Wins",
+      body: [
+        "Handled intake and scheduling.",
+        "",
+        "- Created weekly reports",
+        "- Followed up with customers",
+      ].join("\n"),
+      metadata: { source: "user" },
+    });
+
+    expect(note.body).toContain("Handled intake and scheduling.\n\n- Created weekly reports");
+    expect(note.body).toContain("\n- Followed up with customers");
+  });
+
   it("normalizes the durable work history profile", () => {
     const profile = api.normalizeWorkHistoryProfile({
       id: "workHistory",
       owner: "user-1",
-      body: "Created weekly reports.",
+      body: "Created weekly reports.\n\nImproved follow-up process.",
       sourceHash: "abc123",
       metadata: { source: "resumedoc", organizedAt: "2026-05-26T00:00:00.000Z" },
     });
 
     expect(profile.id).toBe("workHistory");
     expect(profile.metadata.kind).toBe("work_history");
-    expect(profile.body).toContain("Created weekly reports");
+    expect(profile.body).toBe("Created weekly reports.\n\nImproved follow-up process.");
   });
 
   it("stores only identity and source references in package input", () => {
