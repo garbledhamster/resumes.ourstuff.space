@@ -14,9 +14,11 @@ cd ..
 firebase emulators:start --only functions,firestore,storage
 ```
 
-The app uses Firebase sign-in, creates private resume packages, starts Stripe
-Checkout through `C:\Codex\stripe-worker-api`, and downloads the generated DOCX
-through the authenticated Firebase API.
+The app uses Firebase sign-in, creates private resume packages, asks the shared
+Stripe Worker/Cloudflare D1 authority for access, and downloads the generated
+DOCX through the authenticated Firebase API. Firestore stores package metadata;
+D1 is the source of truth for free credits, codes, Stripe payment access, and
+admin controls.
 
 ## Ready Check
 
@@ -42,5 +44,29 @@ The Stripe checkout route lives in the shared Worker:
 
 ```powershell
 cd C:\Codex\stripe-worker-api
+npx wrangler d1 migrations apply ourstuff-payments --remote
 npm run deploy
 ```
+
+Firebase calls the Worker through the internal ResumeDoc routes, so
+`WORKER_INTERNAL_TOKEN` must be configured with the same value in the Worker and
+the `functions-resumes` runtime.
+
+## AI Brain Notes Sync
+
+Resume notes sync to AI Brain through the Firebase Function, not from the
+browser. The function defaults to:
+
+```text
+https://api.ourstuff.space/v1
+```
+
+Set the AI Brain API key as a Firebase secret before deploying the ResumeDoc
+function:
+
+```powershell
+firebase functions:secrets:set AI_BRAIN_API_TOKEN --project ourstuff-firebase
+```
+
+Do not commit the token to this repo. The function sends notes through
+`/scrub` first, then `/remember` with `allowRawStorage=false`.

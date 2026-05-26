@@ -1,4 +1,5 @@
 const { onRequest } = require("firebase-functions/v2/https");
+const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const crypto = require("node:crypto");
 const express = require("express");
@@ -11,9 +12,15 @@ const { DOMParser, XMLSerializer } = require("@xmldom/xmldom");
 
 admin.initializeApp();
 
+const WORKER_INTERNAL_TOKEN_SECRET = defineSecret("WORKER_INTERNAL_TOKEN");
+const AI_BRAIN_API_TOKEN_SECRET = defineSecret("AI_BRAIN_API_TOKEN");
+
 const TEMPLATE_PATH = path.join(__dirname, "assets", "interview-packet-template.docx");
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const PROMPT_VERSION = "2026-05-26-resumedoc-full-packet";
+const RESUMEDOC_APP_ID = "resumedoc";
+const JOBEL_NOTE_MARKER = "ai:jobel-note";
+const AI_BRAIN_DEFAULT_BASE = "https://api.ourstuff.space/v1";
 const SOURCE_ACCENT_HEX = "E97132";
 const DEFAULT_ACCENT_HEX = "2563EB";
 const SKILL_ITEM_COUNT = 9;
@@ -58,6 +65,11 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
+app.get("/api/me/access", requireActor, asyncHandler(async (req, res) => {
+  const result = await workerInternal(req, "/users/self/access");
+  res.json({ ok: true, access: result.access });
+}));
+
 app.post("/api/packages", requireActor, asyncHandler(async (req, res) => {
   const actor = req.actor;
   const input = normalizeInput(req.body?.input || req.body || {});
@@ -88,8 +100,9 @@ app.post("/api/packages", requireActor, asyncHandler(async (req, res) => {
 
 app.get("/api/packages/:id", requireActor, asyncHandler(async (req, res) => {
   const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
+  const synced = await syncPackageAccess(req, pkg);
   const input = await loadJson(pkg.inputStoragePath, {});
-  res.json({ ok: true, package: publicPackage(pkg), input });
+  res.json({ ok: true, package: publicPackage(synced), input });
 }));
 
 app.patch("/api/packages/:id", requireActor, asyncHandler(async (req, res) => {
@@ -108,6 +121,58 @@ app.patch("/api/packages/:id", requireActor, asyncHandler(async (req, res) => {
   res.json({ ok: true, package: publicPackage(updated) });
 }));
 
+app.get("/api/packages/:id/access", requireActor, asyncHandler(async (req, res) => {
+  const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
+  const updated = await syncPackageAccess(req, pkg);
+  res.json({ ok: true, package: publicPackage(updated), access: accessFromPackage(updated) });
+}));
+
+app.post("/api/packages/:id/claim-free", requireActor, asyncHandler(async (req, res) => {
+  const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
+  const result = await workerInternal(req, `/packages/${encodeURIComponent(pkg.id)}/claim-free`, {
+    method: "POST",
+    body: {},
+  });
+  const updated = await applyAccessToPackage(pkg, result.access);
+  res.json({ ok: true, package: publicPackage(updated), access: result.access });
+}));
+
+app.post("/api/packages/:id/redeem-code", requireActor, asyncHandler(async (req, res) => {
+  const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
+  const code = cleanBoundedString(req.body?.code, 80);
+  if (!code) {
+    throw httpError(400, "Code is required.", "missing_code");
+  }
+  const result = await workerInternal(req, `/packages/${encodeURIComponent(pkg.id)}/redeem-code`, {
+    method: "POST",
+    body: { code },
+  });
+  const updated = await applyAccessToPackage(pkg, result.access);
+  res.json({ ok: true, package: publicPackage(updated), access: result.access });
+}));
+
+app.post("/api/packages/:id/checkout", requireActor, asyncHandler(async (req, res) => {
+  const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
+  const returnUrl = cleanBoundedString(req.body?.returnUrl, 1200);
+  const discountCode = cleanBoundedString(req.body?.discountCode, 80);
+  if (!returnUrl) {
+    throw httpError(400, "returnUrl is required.", "missing_return_url");
+  }
+  const checkout = await workerPublic(req, "/api/resume-packages/checkout", {
+    method: "POST",
+    body: withoutUndefined({
+      packageId: pkg.id,
+      returnUrl,
+      discountCode: discountCode || undefined,
+    }),
+  });
+  if (checkout.access) {
+    const updated = await applyAccessToPackage(pkg, checkout.access);
+    checkout.package = publicPackage(updated);
+  }
+  res.status(checkout.checkoutSkipped ? 200 : 201).json({ ok: true, checkout });
+}));
+
 app.post("/api/packages/:id/confirm-payment", requireActor, asyncHandler(async (req, res) => {
   const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
   const stripeSessionId = cleanBoundedString(req.body?.stripeSessionId, 160);
@@ -118,7 +183,9 @@ app.post("/api/packages/:id/confirm-payment", requireActor, asyncHandler(async (
   if (!payment.paid) {
     throw httpError(402, "Stripe payment has not completed yet.", "payment_required");
   }
+  const accessPatch = accessPatchFromWorker(payment.access, pkg);
   const patch = withoutUndefined({
+    ...accessPatch,
     paymentStatus: "paid",
     stripeSessionId,
     paymentConfirmedAt: nowIso(),
@@ -131,11 +198,11 @@ app.post("/api/packages/:id/confirm-payment", requireActor, asyncHandler(async (
 
 app.post("/api/packages/:id/generate", requireActor, asyncHandler(async (req, res) => {
   const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
-  requirePaidPackage(pkg);
+  const unlockedPkg = await requireUnlockedPackage(req, pkg);
   const input = normalizeInput(await loadJson(pkg.inputStoragePath, {}));
   const result = await generateAndStore({
     actor: req.actor,
-    pkg,
+    pkg: unlockedPkg,
     input,
     revisionInstruction: cleanBoundedString(req.body?.instruction, 2000),
     countRevision: false,
@@ -145,7 +212,7 @@ app.post("/api/packages/:id/generate", requireActor, asyncHandler(async (req, re
 
 app.post("/api/packages/:id/revisions", requireActor, asyncHandler(async (req, res) => {
   const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
-  requirePaidPackage(pkg);
+  const unlockedPkg = await requireUnlockedPackage(req, pkg);
   if (!pkg.latestGenerationId) {
     throw httpError(409, "Generate the first DOCX before requesting revisions.", "generation_required");
   }
@@ -160,11 +227,83 @@ app.post("/api/packages/:id/revisions", requireActor, asyncHandler(async (req, r
   const input = normalizeInput(await loadJson(pkg.inputStoragePath, {}));
   const result = await generateAndStore({
     actor: req.actor,
-    pkg,
+    pkg: unlockedPkg,
     input,
     revisionInstruction: instruction,
     countRevision: true,
   });
+  res.json(result);
+}));
+
+app.get("/api/admin/summary", requireActor, asyncHandler(async (req, res) => {
+  const result = await workerInternal(req, "/admin/summary");
+  res.json(result);
+}));
+
+app.get("/api/admin/users", requireActor, asyncHandler(async (req, res) => {
+  const query = cleanBoundedString(req.query?.q, 120);
+  const suffix = query ? `?q=${encodeURIComponent(query)}` : "";
+  const result = await workerInternal(req, `/admin/users${suffix}`);
+  res.json(result);
+}));
+
+app.patch("/api/admin/users/:uidHash", requireActor, asyncHandler(async (req, res) => {
+  const result = await workerInternal(req, `/admin/users/${encodeURIComponent(req.params.uidHash)}`, {
+    method: "PATCH",
+    body: {
+      freeQuota: optionalNumber(req.body?.freeQuota),
+      freeUsed: optionalNumber(req.body?.freeUsed),
+      creditBalance: optionalNumber(req.body?.creditBalance),
+      userStatus: cleanBoundedString(req.body?.userStatus, 20) || undefined,
+      email: cleanBoundedString(req.body?.email, 320) || undefined,
+    },
+  });
+  res.json(result);
+}));
+
+app.post("/api/admin/users/:uidHash/reset-free", requireActor, asyncHandler(async (req, res) => {
+  const result = await workerInternal(req, `/admin/users/${encodeURIComponent(req.params.uidHash)}/reset-free`, {
+    method: "POST",
+    body: {},
+  });
+  res.json(result);
+}));
+
+app.get("/api/admin/codes", requireActor, asyncHandler(async (req, res) => {
+  const result = await workerInternal(req, "/admin/codes");
+  res.json(result);
+}));
+
+app.post("/api/admin/codes", requireActor, asyncHandler(async (req, res) => {
+  const result = await workerInternal(req, "/admin/codes", {
+    method: "POST",
+    body: withoutUndefined({
+      code: cleanBoundedString(req.body?.code, 80),
+      kind: cleanBoundedString(req.body?.kind, 20),
+      description: cleanBoundedString(req.body?.description, 180),
+      creditAmount: optionalNumber(req.body?.creditAmount),
+      maxRedemptions: req.body?.maxRedemptions === null ? null : optionalNumber(req.body?.maxRedemptions),
+      percentOff: optionalNumber(req.body?.percentOff),
+      amountOff: optionalNumber(req.body?.amountOff),
+      currency: cleanBoundedString(req.body?.currency, 10),
+    }),
+  });
+  res.status(201).json(result);
+}));
+
+app.patch("/api/admin/codes/:codeId", requireActor, asyncHandler(async (req, res) => {
+  const result = await workerInternal(req, `/admin/codes/${encodeURIComponent(req.params.codeId)}`, {
+    method: "PATCH",
+    body: withoutUndefined({
+      status: cleanBoundedString(req.body?.status, 20),
+      description: cleanBoundedString(req.body?.description, 180),
+    }),
+  });
+  res.json(result);
+}));
+
+app.get("/api/admin/events", requireActor, asyncHandler(async (req, res) => {
+  const result = await workerInternal(req, "/admin/events");
   res.json(result);
 }));
 
@@ -193,6 +332,81 @@ app.post("/api/extract", requireActor, asyncHandler(async (req, res) => {
   res.json({ ok: true, text: clipText(text, MAX_TEXT) });
 }));
 
+app.post("/api/notes/:noteId/sync-brain", requireActor, asyncHandler(async (req, res) => {
+  const noteId = cleanBoundedString(req.params.noteId, 160);
+  const note = await getOwnedResumeNote(req.actor.uid, noteId);
+  if (!note.body && !note.title) {
+    throw httpError(400, "Write note content before syncing.", "empty_note");
+  }
+  const sourceHash = noteSourceHash(note);
+  if (shouldSkipBrainSync(note, sourceHash)) {
+    res.json({ ok: true, skipped: true, memoryId: note.brainSync.memoryId, sourceHash });
+    return;
+  }
+
+  const noteRef = resumeNoteRef(req.actor.uid, noteId);
+  await noteRef.set({
+    brainSync: withoutUndefined({
+      ...(note.brainSync || {}),
+      status: "pending",
+      sourceHash,
+      lastAttemptAt: nowIso(),
+      errorCode: null,
+    }),
+  }, { merge: true });
+
+  try {
+    const created = await rememberNoteInBrain(note, { sourceHash });
+    const patch = {
+      brainSync: withoutUndefined({
+        status: "synced",
+        sourceHash,
+        memoryId: created.memoryId || created.memory?.id || null,
+        lastAttemptAt: nowIso(),
+        syncedAt: nowIso(),
+        errorCode: null,
+      }),
+    };
+    await noteRef.set(patch, { merge: true });
+    res.json({ ok: true, skipped: false, memoryId: patch.brainSync.memoryId, sourceHash });
+  } catch (error) {
+    await noteRef.set({
+      brainSync: withoutUndefined({
+        ...(note.brainSync || {}),
+        status: "failed",
+        sourceHash,
+        lastAttemptAt: nowIso(),
+        syncedAt: null,
+        errorCode: error.code || "brain_sync_failed",
+      }),
+    }, { merge: true });
+    throw error;
+  }
+}));
+
+app.post("/api/jobel/chat", requireActor, asyncHandler(async (req, res) => {
+  const message = cleanBoundedString(req.body?.message, 900);
+  if (!message) {
+    throw httpError(400, "Message Jobel before sending.", "missing_message");
+  }
+  assertNoBlockedSecrets(message);
+  const packageId = cleanBoundedString(req.body?.packageId, 160);
+  const noteIds = Array.isArray(req.body?.noteIds)
+    ? req.body.noteIds.map((id) => cleanBoundedString(id, 160)).filter(Boolean).slice(0, 12)
+    : [];
+  const pkg = packageId ? await getOwnedPackage(packageId, req.actor.uid).catch(() => null) : null;
+  const input = pkg?.inputStoragePath ? normalizeInput(await loadJson(pkg.inputStoragePath, {})) : {};
+  const notes = await loadResumeNotesForJobel(req.actor.uid, noteIds);
+  const prompt = await buildJobelPrompt({
+    message,
+    input,
+    packageInfo: pkg ? publicPackage(pkg) : null,
+    notes,
+  });
+  const reply = await generateJobelReply(prompt);
+  res.json({ ok: true, reply });
+}));
+
 app.use((req, res) => {
   res.status(404).json({ ok: false, error: { code: "not_found", message: `Route not found: ${req.path}` } });
 });
@@ -213,14 +427,21 @@ exports.resumeApi = onRequest(
     timeoutSeconds: 540,
     memory: "1GiB",
     maxInstances: 10,
+    secrets: [WORKER_INTERNAL_TOKEN_SECRET, AI_BRAIN_API_TOKEN_SECRET],
   },
   app,
 );
 
 exports._test = {
   buildDocx,
+  buildBrainNoteText,
+  buildJobelPrompt,
+  rememberNoteInBrain,
   localResponseFromInput,
   normalizeInput,
+  normalizeResumeNote,
+  noteSourceHash,
+  shouldSkipBrainSync,
   validateResponse,
   extractDocxText,
 };
@@ -300,6 +521,10 @@ function packageRef(id) {
   return db().collection("resume_packages").doc(id);
 }
 
+function resumeNoteRef(uid, noteId) {
+  return db().collection("users").doc(uid).collection("apps").doc(RESUMEDOC_APP_ID).collection("notes").doc(noteId);
+}
+
 async function getOwnedPackage(id, ownerUid) {
   const snap = await packageRef(id).get();
   if (!snap.exists) {
@@ -312,10 +537,80 @@ async function getOwnedPackage(id, ownerUid) {
   return { ...pkg, id: snap.id };
 }
 
-function requirePaidPackage(pkg) {
-  if (pkg.paymentStatus !== "paid" && !localPaymentBypass()) {
-    throw httpError(402, "Pay for this resume package before generating the DOCX.", "payment_required");
+async function getOwnedResumeNote(uid, noteId) {
+  const snap = await resumeNoteRef(uid, noteId).get();
+  if (!snap.exists) {
+    throw httpError(404, "Resume note was not found.", "note_not_found");
   }
+  const note = normalizeResumeNote({ id: snap.id, ...snap.data() });
+  if (note.owner !== uid) {
+    throw httpError(404, "Resume note was not found.", "note_not_found");
+  }
+  return note;
+}
+
+async function loadResumeNotesForJobel(uid, noteIds) {
+  const notes = [];
+  if (noteIds.length) {
+    for (const noteId of noteIds) {
+      try {
+        notes.push(await getOwnedResumeNote(uid, noteId));
+      } catch {}
+    }
+    return notes.slice(0, 12);
+  }
+  const snap = await db()
+    .collection("users")
+    .doc(uid)
+    .collection("apps")
+    .doc(RESUMEDOC_APP_ID)
+    .collection("notes")
+    .orderBy("updatedAt", "desc")
+    .limit(12)
+    .get();
+  return snap.docs.map((docSnap) => normalizeResumeNote({ id: docSnap.id, ...docSnap.data() }));
+}
+
+function normalizeResumeNote(raw = {}) {
+  const metadata = raw.metadata && typeof raw.metadata === "object" ? raw.metadata : {};
+  const isJobel = metadata.source === "jobel" || metadata.marker === JOBEL_NOTE_MARKER;
+  const brainSync = raw.brainSync && typeof raw.brainSync === "object" ? raw.brainSync : {};
+  return {
+    id: cleanBoundedString(raw.id, 160),
+    owner: cleanBoundedString(raw.owner, 160),
+    appId: cleanBoundedString(raw.appId, 80) || RESUMEDOC_APP_ID,
+    packageId: cleanBoundedString(raw.packageId, 160),
+    title: cleanBoundedString(raw.title, 120),
+    body: clipText(asText(raw.body), 12000),
+    createdAt: cleanBoundedString(raw.createdAt, 80),
+    updatedAt: cleanBoundedString(raw.updatedAt, 80),
+    metadata: {
+      source: isJobel ? "jobel" : "user",
+      marker: isJobel ? JOBEL_NOTE_MARKER : metadata.marker || null,
+      readOnly: isJobel || metadata.readOnly === true,
+      contentFormat: metadata.contentFormat === "markdown" ? "markdown" : "plain",
+    },
+    syncToBrain: raw.syncToBrain === true,
+    brainSync: {
+      status: ["not_synced", "pending", "synced", "failed"].includes(brainSync.status) ? brainSync.status : "not_synced",
+      sourceHash: brainSync.sourceHash || null,
+      memoryId: brainSync.memoryId || null,
+      lastAttemptAt: brainSync.lastAttemptAt || null,
+      syncedAt: brainSync.syncedAt || null,
+      errorCode: brainSync.errorCode || null,
+    },
+  };
+}
+
+async function requireUnlockedPackage(req, pkg) {
+  if (localPaymentBypass()) {
+    return { ...pkg, paymentStatus: "paid", accessStatus: "active", accessSource: "local" };
+  }
+  const updated = await syncPackageAccess(req, pkg);
+  if (updated.accessStatus !== "active") {
+    throw httpError(402, "Unlock this resume package before generating the DOCX.", "access_required");
+  }
+  return updated;
 }
 
 function localPaymentBypass() {
@@ -326,7 +621,7 @@ async function verifyPaymentWithWorker(req, pkg, stripeSessionId) {
   if (localPaymentBypass() && stripeSessionId === "dev-paid") {
     return { paid: true, packageId: pkg.id, invoiceLabel: "DEV-000001" };
   }
-  const base = (process.env.PAYMENTS_WORKER_BASE || "https://stripe-worker-api.jrice.workers.dev").replace(/\/$/, "");
+  const base = paymentsWorkerBase();
   const url = `${base}/api/resume-packages/${encodeURIComponent(pkg.id)}/payment?session_id=${encodeURIComponent(stripeSessionId)}`;
   const response = await fetch(url, {
     headers: {
@@ -338,6 +633,107 @@ async function verifyPaymentWithWorker(req, pkg, stripeSessionId) {
     throw httpError(response.status, data?.error?.message || "Could not verify Stripe payment.", data?.error?.code || "payment_verify_failed");
   }
   return data;
+}
+
+async function syncPackageAccess(req, pkg) {
+  if (localPaymentBypass()) {
+    return pkg;
+  }
+  const result = await workerInternal(req, `/packages/${encodeURIComponent(pkg.id)}/access`);
+  return applyAccessToPackage(pkg, result.access);
+}
+
+async function applyAccessToPackage(pkg, access) {
+  const patch = accessPatchFromWorker(access, pkg);
+  if (!Object.keys(patch).length) {
+    return pkg;
+  }
+  await packageRef(pkg.id).set(patch, { merge: true });
+  return { ...pkg, ...patch };
+}
+
+function accessPatchFromWorker(access, pkg = {}) {
+  const packageAccess = access?.package;
+  if (!packageAccess) return {};
+  const unlocked = packageAccess.unlocked === true || packageAccess.accessStatus === "active";
+  const source = packageAccess.accessSource || null;
+  return withoutUndefined({
+    accessStatus: unlocked ? "active" : "locked",
+    accessSource: source,
+    entitlementId: packageAccess.entitlementId || null,
+    checkoutSessionId: packageAccess.checkoutSessionId || pkg.checkoutSessionId || null,
+    invoiceLabel: packageAccess.invoiceLabel || pkg.invoiceLabel || null,
+    paymentStatus: unlocked ? (source && source.startsWith("stripe") ? "paid" : "unlocked") : pkg.paymentStatus || "unpaid",
+    updatedAt: nowIso(),
+  });
+}
+
+function accessFromPackage(pkg) {
+  return {
+    package: {
+      packageId: pkg.id,
+      unlocked: pkg.accessStatus === "active" || pkg.paymentStatus === "paid",
+      accessStatus: pkg.accessStatus || (pkg.paymentStatus === "paid" ? "active" : "locked"),
+      accessSource: pkg.accessSource || null,
+      entitlementId: pkg.entitlementId || null,
+      invoiceLabel: pkg.invoiceLabel || null,
+      checkoutSessionId: pkg.checkoutSessionId || pkg.stripeSessionId || null,
+    },
+  };
+}
+
+async function workerInternal(req, path, options = {}) {
+  const token = process.env.WORKER_INTERNAL_TOKEN || process.env.RESUMEDOC_WORKER_INTERNAL_TOKEN;
+  if (!token) {
+    throw httpError(500, "WORKER_INTERNAL_TOKEN is not configured for ResumeDoc.", "missing_worker_internal_token");
+  }
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+    "x-resumedoc-uid": req.actor.uid,
+    "x-resumedoc-email": req.actor.email || "",
+    "x-resumedoc-email-verified": req.actor.emailVerified ? "true" : "false",
+  };
+  return workerFetch(`/api/internal/resumedoc${path}`, {
+    method: options.method || "GET",
+    headers,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  });
+}
+
+async function workerPublic(req, path, options = {}) {
+  return workerFetch(path, {
+    method: options.method || "GET",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: req.headers.authorization || "",
+    },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  });
+}
+
+async function workerFetch(path, options = {}) {
+  const base = paymentsWorkerBase();
+  const response = await fetch(`${base}${path}`, options);
+  const text = await response.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+  if (!response.ok) {
+    throw httpError(
+      response.status,
+      data?.error?.message || data?.message || data?.raw || "Worker request failed.",
+      data?.error?.code || "worker_request_failed",
+    );
+  }
+  return data;
+}
+
+function paymentsWorkerBase() {
+  return (process.env.PAYMENTS_WORKER_BASE || "https://stripe-worker-api.jrice.workers.dev").replace(/\/$/, "");
 }
 
 async function saveJson(storagePath, value) {
@@ -430,6 +826,213 @@ async function buildPacketResponse(input, revisionInstruction) {
     }
   }
   return validateResponse(localResponseFromInput(input, revisionInstruction), input);
+}
+
+function noteSourceHash(note) {
+  return sha256Json({
+    title: note.title || "",
+    body: note.body || "",
+    packageId: note.packageId || "",
+    source: note.metadata?.source || "user",
+  });
+}
+
+function shouldSkipBrainSync(note, sourceHash = noteSourceHash(note)) {
+  return Boolean(note.brainSync?.status === "synced" && note.brainSync?.sourceHash === sourceHash && note.brainSync?.memoryId);
+}
+
+function sha256Json(value) {
+  return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function buildBrainNoteText(note) {
+  return [
+    "ResumeDoc note",
+    note.title ? `Title: ${note.title}` : "",
+    note.packageId ? `Package: ${note.packageId}` : "",
+    note.metadata?.source ? `Source: ${note.metadata.source}` : "",
+    "",
+    note.body || "",
+  ].filter((line) => line !== "").join("\n");
+}
+
+async function rememberNoteInBrain(note, { sourceHash }) {
+  assertNoBlockedSecrets(`${note.title}\n${note.body}`);
+  const scrubbed = await scrubWithAiBrain(buildBrainNoteText(note));
+  if (scrubbed.blocked) {
+    throw httpError(422, "This note contains content that cannot be synced to AI Brain.", "blocked_sensitive_note");
+  }
+  return aiBrainFetch("/remember", {
+    projectSlug: "resumes.ourstuff.space",
+    sourceApp: "browser",
+    sourceUrl: "https://resumes.ourstuff.space",
+    text: scrubbed.scrubbedText || scrubbed.text || "",
+    userSuggestedCategory: "01 Projects",
+    userSuggestedTags: ["resumedoc", "resume-note", sourceHash.slice(0, 12)],
+    allowRawStorage: false,
+    allowedConsumers: ["chatgpt", "codex", "mort", "mcp"],
+  });
+}
+
+async function scrubWithAiBrain(text) {
+  const result = await aiBrainFetch("/scrub", { text });
+  return {
+    ...result,
+    scrubbedText: result.scrubbedText || result.text || "",
+    blocked: result.blocked === true,
+  };
+}
+
+async function aiBrainFetch(pathSuffix, body) {
+  const token = process.env.AI_BRAIN_API_TOKEN || process.env.AIBRAIN_API_TOKEN;
+  if (!token) {
+    throw httpError(503, "AI Brain token is not configured.", "missing_ai_brain_token");
+  }
+  const response = await fetch(`${aiBrainBase()}${pathSuffix}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+  if (!response.ok) {
+    throw httpError(
+      response.status,
+      data?.error?.message || data?.message || data?.raw || "AI Brain request failed.",
+      data?.error?.code || "ai_brain_request_failed",
+    );
+  }
+  return data;
+}
+
+function aiBrainBase() {
+  return (process.env.AI_BRAIN_API_BASE || AI_BRAIN_DEFAULT_BASE).replace(/\/$/, "");
+}
+
+async function buildJobelPrompt({ message, input, packageInfo, notes }) {
+  assertNoBlockedSecrets(message);
+  const scrubbedMessage = await scrubWithAiBrain(message);
+  if (scrubbedMessage.blocked) {
+    throw httpError(422, "This message contains content that cannot be sent to Jobel.", "blocked_sensitive_message");
+  }
+  const scrubbedNotes = [];
+  for (const note of notes.slice(0, 12)) {
+    assertNoBlockedSecrets(`${note.title}\n${note.body}`);
+    const scrubbed = await scrubWithAiBrain([note.title, note.body].filter(Boolean).join("\n"));
+    if (!scrubbed.blocked) {
+      scrubbedNotes.push({
+        id: note.id,
+        source: note.metadata?.source || "user",
+        title: note.title || "",
+        text: scrubbed.scrubbedText,
+        updatedAt: note.updatedAt || note.createdAt || "",
+      });
+    }
+  }
+  const resumeContext = await scrubWithAiBrain(compactJobelResumeContext(input));
+  const payload = {
+    userMessage: scrubbedMessage.scrubbedText,
+    resumePackage: packageInfo ? {
+      id: packageInfo.id,
+      status: packageInfo.status,
+      generatedAt: packageInfo.generatedAt || null,
+    } : null,
+    resumeContext: resumeContext.blocked ? "" : resumeContext.scrubbedText,
+    notes: scrubbedNotes,
+  };
+  return [
+    "You are Jobel, a practical resume-development assistant for ResumeDoc.",
+    "Use only the scrubbed user message, scrubbed notes, and scrubbed resume context provided.",
+    "Do not invent work history, employers, degrees, dates, certifications, metrics, or claims.",
+    "If a needed fact is missing, ask for it directly.",
+    "Be concise, specific, and action-oriented. Return markdown only.",
+    "Do not mention privacy scrubbing unless the user asks.",
+    "",
+    JSON.stringify(payload, null, 2),
+  ].join("\n");
+}
+
+function compactJobelResumeContext(input = {}) {
+  return JSON.stringify({
+    targetRole: input.targetRole || "",
+    jobPost: clipText(input.jobPost || "", 6000),
+    workHistory: clipText(input.workHistory || "", 8000),
+    notes: clipText(input.notes || "", 2000),
+  });
+}
+
+async function generateJobelReply(prompt) {
+  if (!process.env.OPENROUTER_API_KEY) {
+    return localJobelReply(prompt);
+  }
+  const content = await callOpenRouterText(
+    [
+      "You are Jobel, a resume-development coach inside ResumeDoc.",
+      "Never invent candidate facts.",
+      "Use short markdown paragraphs or bullets.",
+    ].join(" "),
+    prompt,
+  );
+  return clipText(content, 3000, "Jobel could not produce a reply.");
+}
+
+async function callOpenRouterText(systemPrompt, userPrompt) {
+  const payload = {
+    model: process.env.OPENROUTER_MODEL || "openrouter/auto",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    temperature: 0.25,
+    max_tokens: 1200,
+  };
+  const raw = await postOpenRouter(payload);
+  const data = JSON.parse(raw);
+  const content = data?.choices?.[0]?.message?.content;
+  if (Array.isArray(content)) {
+    return content.map((part) => (typeof part === "object" ? part.text || "" : String(part))).join("\n").trim();
+  }
+  return String(content || "").trim();
+}
+
+function localJobelReply(prompt) {
+  let payload = {};
+  try {
+    const start = prompt.indexOf("{");
+    payload = start >= 0 ? JSON.parse(prompt.slice(start)) : {};
+  } catch {}
+  const message = String(payload.userMessage || "").slice(0, 180);
+  const hasNotes = Array.isArray(payload.notes) && payload.notes.length > 0;
+  return [
+    "### Jobel note",
+    message ? `I would start by tightening the resume around this request: ${message}` : "I would start by tightening the resume around the target role.",
+    hasNotes
+      ? "- I can use the saved notes as supporting evidence, but I will not turn them into claims unless the note gives a concrete fact."
+      : "- Add one or two notes with specific wins, tools, dates, or constraints so I can help shape stronger resume bullets.",
+    "- Next best step: add measurable outcomes where you know them, and mark unknowns as questions instead of guessing.",
+  ].join("\n");
+}
+
+function assertNoBlockedSecrets(text) {
+  const value = String(text || "");
+  const patterns = [
+    /\b(?:\d[ -]*?){13,19}\b/,
+    /\b(?:cvv|cvc|security code)\b/i,
+    /\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b/,
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+    /\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token)\s*[:=]\s*['"]?[A-Za-z0-9_.-]{16,}/i,
+  ];
+  if (patterns.some((pattern) => pattern.test(value))) {
+    throw httpError(422, "This request contains content that cannot be sent to AI.", "blocked_secret_detected");
+  }
 }
 
 function buildPrompt(input, revisionInstruction) {
@@ -1198,7 +1801,11 @@ function publicPackage(pkg) {
     title: pkg.title,
     status: pkg.status,
     paymentStatus: pkg.paymentStatus,
+    accessStatus: pkg.accessStatus,
+    accessSource: pkg.accessSource,
+    entitlementId: pkg.entitlementId,
     stripeSessionId: pkg.stripeSessionId,
+    checkoutSessionId: pkg.checkoutSessionId,
     editsTotal: pkg.editsTotal,
     editsUsed: pkg.editsUsed,
     latestGenerationId: pkg.latestGenerationId,
@@ -1453,6 +2060,12 @@ function asText(value, fallback = "") {
 
 function cleanBoundedString(value, max) {
   return clipText(asText(value).replace(/\s+/g, " "), max);
+}
+
+function optionalNumber(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
 }
 
 function clipText(value, limit, fallback = "") {

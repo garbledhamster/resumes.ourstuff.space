@@ -76,8 +76,8 @@
           </article>
           <article data-step="checkout">
             <span>02</span>
-            <strong>Checkout</strong>
-            <p>Pay for one resume package through Stripe Checkout.</p>
+            <strong>Unlock</strong>
+            <p>Use a free package, code, credit, or Stripe Checkout.</p>
           </article>
           <article data-step="details">
             <span>03</span>
@@ -202,6 +202,27 @@
                 </label>
               </div>
 
+              <div class="access-tools">
+                <div>
+                  <strong id="accessTitle">Package access</strong>
+                  <p id="accessText">Sign in to load free package credits and codes.</p>
+                </div>
+                <div class="code-row">
+                  <input
+                    id="discountCode"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Code"
+                  />
+                  <button id="claimFreeBtn" class="button primary" type="button">
+                    Use free resume
+                  </button>
+                  <button id="redeemCodeBtn" class="button" type="button">
+                    Apply code
+                  </button>
+                </div>
+              </div>
+
               <div class="button-row footer-actions">
                 <button id="savePackageBtn" class="button primary" type="button">
                   Save package
@@ -262,8 +283,167 @@
             </section>
           </aside>
         </section>
+
+        <section id="adminPanel" class="admin-panel panel hidden" aria-label="ResumeDoc admin">
+          <div class="panel-heading">
+            <div>
+              <span class="eyebrow">Owner admin</span>
+              <h2>ResumeDoc controls</h2>
+            </div>
+            <span id="adminBadge" class="pill neutral">Loading</span>
+          </div>
+
+          <div id="adminStats" class="admin-stats"></div>
+
+          <div class="admin-grid">
+            <section class="admin-block">
+              <div class="admin-block-heading">
+                <strong>Users</strong>
+                <div class="code-row compact-row">
+                  <input id="adminUserSearch" type="search" placeholder="Email or uid hash" />
+                  <button id="adminUserSearchBtn" class="button" type="button">Search</button>
+                </div>
+              </div>
+              <div id="adminUsers" class="admin-list"></div>
+            </section>
+
+            <section class="admin-block">
+              <div class="admin-block-heading">
+                <strong>Codes</strong>
+              </div>
+              <form id="adminCodeForm" class="admin-code-form">
+                <input id="adminCodeValue" placeholder="CODE" />
+                <select id="adminCodeKind" aria-label="Code kind">
+                  <option value="credit">Package credit</option>
+                  <option value="stripe">Stripe discount</option>
+                </select>
+                <input id="adminCodeUses" type="number" min="1" placeholder="Uses" />
+                <input id="adminCodeCreditAmount" type="number" min="1" value="1" />
+                <input id="adminCodePercent" type="number" min="1" max="100" placeholder="% off" />
+                <input id="adminCodeAmount" type="number" min="50" max="499" placeholder="Cents off" />
+                <button class="button primary" type="submit">Create code</button>
+              </form>
+              <div id="adminCodes" class="admin-list"></div>
+            </section>
+          </div>
+
+          <section class="admin-block">
+            <div class="admin-block-heading">
+              <strong>Recent events</strong>
+            </div>
+            <div id="adminEvents" class="admin-list compact-events"></div>
+          </section>
+        </section>
       </main>
     </div>
+
+    <div class="notes-launcher" aria-label="Notes and Jobel tools">
+      <button id="notesLauncherBtn" class="notes-launcher-btn" type="button">
+        Notes
+      </button>
+      <button id="jobelLauncherBtn" class="notes-launcher-btn accent" type="button">
+        Chat with Jobel
+      </button>
+    </div>
+
+    <section
+      id="notesDrawer"
+      class="notes-drawer hidden"
+      aria-label="Resume notes and Jobel"
+      aria-hidden="true"
+    >
+      <button id="notesDrawerBackdrop" class="notes-drawer-backdrop" type="button" aria-label="Close notes"></button>
+      <div class="notes-drawer-panel">
+        <div class="notes-drawer-head">
+          <div>
+            <span class="eyebrow">Resume notes</span>
+            <h2>Build with Jobel</h2>
+          </div>
+          <button id="closeNotesDrawerBtn" class="icon-button" type="button" aria-label="Close notes">
+            ×
+          </button>
+        </div>
+
+        <div class="notes-tabs" role="tablist" aria-label="Notes drawer views">
+          <button id="notesPanelTab" class="notes-tab active" type="button" data-notes-panel="notes">
+            Notes
+          </button>
+          <button id="jobelPanelTab" class="notes-tab" type="button" data-notes-panel="jobel">
+            Jobel
+          </button>
+        </div>
+
+        <div id="notesPanel" class="notes-panel active">
+          <div class="notes-toolbar">
+            <select id="noteFilter" aria-label="Filter notes">
+              <option value="all">All notes</option>
+              <option value="user">Your notes</option>
+              <option value="jobel">Jobel notes</option>
+              <option value="synced">Synced</option>
+              <option value="pending">Pending</option>
+              <option value="failed">Failed</option>
+            </select>
+            <button id="newNoteBtn" class="button primary" type="button">New note</button>
+          </div>
+
+          <div id="notesEmpty" class="notes-empty">
+            Sign in and start a note to build resume context over time.
+          </div>
+          <div id="notesList" class="notes-list"></div>
+
+          <form id="noteEditorForm" class="note-editor">
+            <div class="note-editor-head">
+              <strong id="noteEditorHeading">New note</strong>
+              <span id="noteSyncStatus" class="pill neutral">Not synced</span>
+            </div>
+            <label>
+              <span>Title</span>
+              <input id="noteTitle" maxlength="120" placeholder="What is this note about?" />
+            </label>
+            <label>
+              <span>Note</span>
+              <textarea
+                id="noteBody"
+                rows="8"
+                placeholder="Log resume details, wins, constraints, job ideas, or questions for Jobel."
+              ></textarea>
+            </label>
+            <label class="check-row">
+              <input id="noteSyncCheckbox" type="checkbox" />
+              <span>Sync to ourstuff.space ecosystem</span>
+            </label>
+            <div class="button-row">
+              <button id="saveNoteBtn" class="button primary" type="submit">Save note</button>
+              <button id="deleteNoteBtn" class="button" type="button">Delete</button>
+            </div>
+          </form>
+        </div>
+
+        <div id="jobelPanel" class="notes-panel">
+          <div class="jobel-intro">
+            <strong>Jobel</strong>
+            <p>
+              A resume-development assistant that uses your saved notes and package brief.
+            </p>
+          </div>
+          <div id="jobelMessages" class="jobel-messages" aria-live="polite"></div>
+          <form id="jobelForm" class="jobel-form">
+            <label>
+              <span>Message Jobel</span>
+              <textarea
+                id="jobelInput"
+                rows="4"
+                maxlength="900"
+                placeholder="Ask what to improve, what facts are missing, or how to shape this resume."
+              ></textarea>
+            </label>
+            <button id="sendJobelBtn" class="button accent full" type="submit">
+              Send to Jobel
+            </button>
+          </form>
+        </div>
+      </div>
+    </section>
 
     <script src="config.js"></script>
     <script type="module" src="app.js"></script>

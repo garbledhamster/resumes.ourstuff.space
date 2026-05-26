@@ -8,14 +8,41 @@ const requiredFields = [
   "jobPost",
   "workHistory",
 ];
+const APP_ID = config.appId || "resumedoc";
+const JOBEL_NOTE_MARKER = "ai:jobel-note";
+const NOTE_SYNC_STATUSES = {
+  not_synced: ["Not synced", "neutral"],
+  pending: ["Pending", "warn"],
+  synced: ["Synced", "good"],
+  failed: ["Failed", "bad"],
+};
 
 const state = {
   auth: null,
   authModule: null,
+  firestore: null,
+  firestoreModule: null,
+  notesUnsubscribe: null,
   user: null,
   idToken: "",
   firebaseReady: false,
   activePackage: null,
+  access: null,
+  apiBaseOverride: "",
+  notes: [],
+  notesLoaded: false,
+  activeNoteId: null,
+  notesPanel: "notes",
+  noteFilter: "all",
+  drawerOpen: false,
+  jobelMessages: [],
+  syncingNoteIds: new Set(),
+  admin: {
+    summary: null,
+    users: [],
+    codes: [],
+    events: [],
+  },
   busy: false,
 };
 
@@ -51,6 +78,11 @@ const els = {
   resumeFile: document.querySelector("#resumeFile"),
   fileLabel: document.querySelector("#fileLabel"),
   savePackageBtn: document.querySelector("#savePackageBtn"),
+  accessTitle: document.querySelector("#accessTitle"),
+  accessText: document.querySelector("#accessText"),
+  discountCode: document.querySelector("#discountCode"),
+  claimFreeBtn: document.querySelector("#claimFreeBtn"),
+  redeemCodeBtn: document.querySelector("#redeemCodeBtn"),
   checkoutBtn: document.querySelector("#checkoutBtn"),
   generateBtn: document.querySelector("#generateBtn"),
   downloadText: document.querySelector("#downloadText"),
@@ -58,6 +90,46 @@ const els = {
   revisionText: document.querySelector("#revisionText"),
   revisionBtn: document.querySelector("#revisionBtn"),
   activityLog: document.querySelector("#activityLog"),
+  adminPanel: document.querySelector("#adminPanel"),
+  adminBadge: document.querySelector("#adminBadge"),
+  adminStats: document.querySelector("#adminStats"),
+  adminUsers: document.querySelector("#adminUsers"),
+  adminUserSearch: document.querySelector("#adminUserSearch"),
+  adminUserSearchBtn: document.querySelector("#adminUserSearchBtn"),
+  adminCodeForm: document.querySelector("#adminCodeForm"),
+  adminCodeValue: document.querySelector("#adminCodeValue"),
+  adminCodeKind: document.querySelector("#adminCodeKind"),
+  adminCodeUses: document.querySelector("#adminCodeUses"),
+  adminCodeCreditAmount: document.querySelector("#adminCodeCreditAmount"),
+  adminCodePercent: document.querySelector("#adminCodePercent"),
+  adminCodeAmount: document.querySelector("#adminCodeAmount"),
+  adminCodes: document.querySelector("#adminCodes"),
+  adminEvents: document.querySelector("#adminEvents"),
+  notesLauncherBtn: document.querySelector("#notesLauncherBtn"),
+  jobelLauncherBtn: document.querySelector("#jobelLauncherBtn"),
+  notesDrawer: document.querySelector("#notesDrawer"),
+  notesDrawerBackdrop: document.querySelector("#notesDrawerBackdrop"),
+  closeNotesDrawerBtn: document.querySelector("#closeNotesDrawerBtn"),
+  notesPanelTab: document.querySelector("#notesPanelTab"),
+  jobelPanelTab: document.querySelector("#jobelPanelTab"),
+  notesPanel: document.querySelector("#notesPanel"),
+  jobelPanel: document.querySelector("#jobelPanel"),
+  noteFilter: document.querySelector("#noteFilter"),
+  newNoteBtn: document.querySelector("#newNoteBtn"),
+  notesEmpty: document.querySelector("#notesEmpty"),
+  notesList: document.querySelector("#notesList"),
+  noteEditorForm: document.querySelector("#noteEditorForm"),
+  noteEditorHeading: document.querySelector("#noteEditorHeading"),
+  noteSyncStatus: document.querySelector("#noteSyncStatus"),
+  noteTitle: document.querySelector("#noteTitle"),
+  noteBody: document.querySelector("#noteBody"),
+  noteSyncCheckbox: document.querySelector("#noteSyncCheckbox"),
+  saveNoteBtn: document.querySelector("#saveNoteBtn"),
+  deleteNoteBtn: document.querySelector("#deleteNoteBtn"),
+  jobelMessages: document.querySelector("#jobelMessages"),
+  jobelForm: document.querySelector("#jobelForm"),
+  jobelInput: document.querySelector("#jobelInput"),
+  sendJobelBtn: document.querySelector("#sendJobelBtn"),
 };
 
 function isLocalPage() {
@@ -65,6 +137,7 @@ function isLocalPage() {
 }
 
 function apiBase() {
+  if (state.apiBaseOverride) return state.apiBaseOverride;
   return (
     isLocalPage()
       ? config.localApiBase || config.productionApiBase
@@ -133,12 +206,25 @@ function completionPercent() {
   return Math.round((filled / requiredFields.length) * 100);
 }
 
+function packageUnlocked(pkg = state.activePackage) {
+  return Boolean(pkg && (pkg.accessStatus === "active" || pkg.paymentStatus === "paid" || pkg.paymentStatus === "unlocked"));
+}
+
+function userAccess() {
+  return state.access?.user || null;
+}
+
+function freeOrCreditAvailable() {
+  const access = userAccess();
+  return (access?.freeRemaining || 0) > 0 || (access?.creditBalance || 0) > 0;
+}
+
 function canGenerate() {
   const pkg = state.activePackage;
   return Boolean(
     state.user &&
       pkg &&
-      pkg.paymentStatus === "paid" &&
+      packageUnlocked(pkg) &&
       completionPercent() === 100 &&
       !state.busy,
   );
@@ -147,8 +233,9 @@ function canGenerate() {
 function canRevise() {
   const pkg = state.activePackage;
   return Boolean(
-    state.user &&
+      state.user &&
       pkg &&
+      packageUnlocked(pkg) &&
       pkg.latestGenerationId &&
       (pkg.editsTotal || 5) - (pkg.editsUsed || 0) > 0 &&
       !state.busy,
@@ -166,15 +253,22 @@ function render() {
   const editsTotal = pkg?.editsTotal ?? config.editsTotal ?? 5;
   const editsUsed = pkg?.editsUsed ?? 0;
   const editsLeft = Math.max(0, editsTotal - editsUsed);
+  const access = userAccess();
+  const unlocked = packageUnlocked(pkg);
+  const freeRemaining = access?.freeRemaining ?? 0;
+  const creditBalance = access?.creditBalance ?? 0;
 
   els.completionBar.style.width = `${completion}%`;
   els.completionLabel.textContent = `${completion}%`;
-  els.paymentLabel.textContent =
-    pkg?.paymentStatus === "paid"
-      ? "Paid"
-      : pkg?.paymentStatus === "pending"
-        ? "Pending"
-        : "Unpaid";
+  els.paymentLabel.textContent = unlocked
+    ? "Unlocked"
+    : freeRemaining > 0
+      ? "Free"
+      : creditBalance > 0
+        ? "Credit"
+        : pkg?.paymentStatus === "pending"
+          ? "Pending"
+          : "Locked";
   els.editsLabel.textContent = String(editsLeft);
 
   setPill(
@@ -210,12 +304,31 @@ function render() {
   els.downloadText.textContent = pkg?.latestGenerationId
     ? "The latest completed Word packet is ready."
     : "The completed packet will appear here after generation.";
+  if (els.accessTitle) {
+    els.accessTitle.textContent = unlocked
+      ? `Unlocked by ${pkg.accessSource || "access"}`
+      : state.user
+        ? `${freeRemaining} free, ${creditBalance} credit`
+        : "Package access";
+  }
+  if (els.accessText) {
+    els.accessText.textContent = unlocked
+      ? "D1 has an active entitlement for this package."
+      : state.user
+        ? "Use a free package credit, apply a code, or continue to Stripe Checkout."
+        : "Sign in to load free package credits and codes.";
+  }
 
   els.savePackageBtn.disabled = !state.user || state.busy;
-  els.checkoutBtn.disabled = !state.user || !pkg || pkg.paymentStatus === "paid" || state.busy;
+  els.claimFreeBtn.disabled = !state.user || !pkg || unlocked || !freeOrCreditAvailable() || state.busy;
+  els.claimFreeBtn.textContent = freeRemaining > 0 ? "Use free resume" : creditBalance > 0 ? "Use credit" : "No credits";
+  els.redeemCodeBtn.disabled = !state.user || !pkg || unlocked || !els.discountCode.value.trim() || state.busy;
+  els.checkoutBtn.disabled = !state.user || !pkg || unlocked || state.busy;
   els.generateBtn.disabled = !canGenerate();
   els.downloadBtn.disabled = !state.user || !pkg?.latestGenerationId || state.busy;
   els.revisionBtn.disabled = !canRevise() || !els.revisionText.value.trim();
+  renderNotesDrawer();
+  renderAdmin();
 
   document.querySelectorAll(".steps article").forEach((step) => {
     step.classList.remove("active", "done");
@@ -230,7 +343,7 @@ function markSteps(pkg, completion) {
     done.push("account");
     active = "checkout";
   }
-  if (pkg?.paymentStatus === "paid") {
+  if (packageUnlocked(pkg)) {
     done.push("checkout");
     active = "details";
   }
@@ -313,12 +426,43 @@ async function workerApi(path, options = {}) {
 }
 
 async function checkHealth() {
+  const localBase = (config.localApiBase || "").replace(/\/$/, "");
+  const productionBase = (config.productionApiBase || "").replace(/\/$/, "");
+  const candidates = [
+    isLocalPage() ? localBase : productionBase || localBase,
+    ...(isLocalPage() && productionBase && productionBase !== localBase ? [productionBase] : []),
+  ].filter(Boolean);
+
+  for (const base of candidates) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2200);
+    try {
+      const response = await fetch(`${base}/health`, {
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      state.apiBaseOverride = base;
+      setPill(els.connectionState, base === productionBase && isLocalPage() ? "API ready: live" : "API ready", "good");
+      return;
+    } catch (error) {
+      log(`API check failed at ${base}: ${error.message}`);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  setPill(els.connectionState, "API offline", "bad");
+}
+
+async function loadAccess() {
+  if (!state.user) return;
   try {
-    await api("/health", { noAuth: true });
-    setPill(els.connectionState, "API ready", "good");
+    const result = await api("/me/access");
+    state.access = result.access || null;
   } catch (error) {
-    setPill(els.connectionState, "API offline", "bad");
     log(error.message);
+  } finally {
+    render();
   }
 }
 
@@ -328,14 +472,17 @@ async function initializeFirebase() {
     throw new Error("Firebase config is missing");
   }
   const version = config.firebaseSdkVersion || "11.10.0";
-  const [{ initializeApp }, authModule] = await Promise.all([
+  const [{ initializeApp }, authModule, firestoreModule] = await Promise.all([
     import(`https://www.gstatic.com/firebasejs/${version}/firebase-app.js`),
     import(`https://www.gstatic.com/firebasejs/${version}/firebase-auth.js`),
+    import(`https://www.gstatic.com/firebasejs/${version}/firebase-firestore.js`),
   ]);
   const app = initializeApp(firebase);
   state.auth = authModule.getAuth(app);
   await authModule.setPersistence(state.auth, authModule.browserLocalPersistence);
   state.authModule = authModule;
+  state.firestore = firestoreModule.getFirestore(app);
+  state.firestoreModule = firestoreModule;
   state.firebaseReady = true;
 
   authModule.onAuthStateChanged(state.auth, async (user) => {
@@ -347,10 +494,21 @@ async function initializeFirebase() {
     render();
     if (user) {
       log("Signed in.");
+      await loadAccess();
       await loadActivePackage();
+      startNotesListener(user.uid);
       await handlePaymentReturn();
+      if (state.access?.admin) await loadAdminData();
     } else {
+      stopNotesListener();
+      state.notes = [];
+      state.notesLoaded = false;
+      state.activeNoteId = null;
+      state.jobelMessages = [];
+      state.access = null;
+      state.admin = { summary: null, users: [], codes: [], events: [] };
       setActivePackage(null);
+      renderNotesDrawer();
     }
   });
 }
@@ -454,15 +612,60 @@ async function startCheckout() {
   if (!pkg) return;
   setBusy(true);
   try {
-    const data = await workerApi("/api/resume-packages/checkout", {
+    const data = await api(`/packages/${encodeURIComponent(pkg.id)}/checkout`, {
       method: "POST",
       body: JSON.stringify({
-        packageId: pkg.id,
         returnUrl: returnUrl(pkg.id),
+        discountCode: els.discountCode.value.trim() || undefined,
       }),
     });
+    if (data.checkout?.checkoutSkipped) {
+      setActivePackage(data.checkout.package || pkg);
+      await loadAccess();
+      log("Package already unlocked.");
+      return;
+    }
     log("Opening Stripe Checkout.");
-    window.location.href = data.url;
+    window.location.href = data.checkout.url;
+  } catch (error) {
+    log(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function claimFreePackage() {
+  const pkg = state.activePackage || (await savePackage());
+  if (!pkg) return;
+  setBusy(true);
+  try {
+    const result = await api(`/packages/${encodeURIComponent(pkg.id)}/claim-free`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    setActivePackage(result.package);
+    state.access = result.access;
+    log("Package unlocked.");
+  } catch (error) {
+    log(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function redeemCode() {
+  const pkg = state.activePackage || (await savePackage());
+  const code = els.discountCode.value.trim();
+  if (!pkg || !code) return;
+  setBusy(true);
+  try {
+    const result = await api(`/packages/${encodeURIComponent(pkg.id)}/redeem-code`, {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    });
+    setActivePackage(result.package);
+    state.access = result.access;
+    log("Code applied.");
   } catch (error) {
     log(error.message);
   } finally {
@@ -484,6 +687,7 @@ async function handlePaymentReturn() {
       body: JSON.stringify({ stripeSessionId: sessionId }),
     });
     setActivePackage(result.package);
+    await loadAccess();
     log("Payment confirmed.");
     params.delete("resume_payment");
     params.delete("session_id");
@@ -611,6 +815,648 @@ function fileToBase64(file) {
   });
 }
 
+function notesCacheKey() {
+  return state.user ? `resumedoc.notes.${state.user.uid}` : "";
+}
+
+function cacheNotes() {
+  const key = notesCacheKey();
+  if (!key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify(state.notes.slice(0, 100)));
+  } catch {}
+}
+
+function loadCachedNotes() {
+  const key = notesCacheKey();
+  if (!key) return [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(parsed) ? parsed.map(normalizeNoteDoc).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function notesCollectionRef() {
+  const f = state.firestoreModule;
+  if (!state.user || !state.firestore || !f) return null;
+  return f.collection(state.firestore, "users", state.user.uid, "apps", APP_ID, "notes");
+}
+
+function noteDocRef(noteId) {
+  const f = state.firestoreModule;
+  if (!state.user || !state.firestore || !f || !noteId) return null;
+  return f.doc(state.firestore, "users", state.user.uid, "apps", APP_ID, "notes", noteId);
+}
+
+function normalizeNoteDoc(docLike) {
+  const id = docLike?.id || "";
+  const data = typeof docLike?.data === "function" ? docLike.data() : docLike || {};
+  if (!id && !data.id) return null;
+  const metadata = data.metadata && typeof data.metadata === "object" ? data.metadata : {};
+  const brainSync = data.brainSync && typeof data.brainSync === "object" ? data.brainSync : {};
+  return {
+    id: id || data.id,
+    owner: data.owner || "",
+    appId: data.appId || APP_ID,
+    packageId: data.packageId || "",
+    title: cleanClientString(data.title, 120),
+    body: String(data.body || ""),
+    createdAt: data.createdAt || "",
+    updatedAt: data.updatedAt || "",
+    metadata: normalizeNoteMetadata(metadata),
+    syncToBrain: data.syncToBrain === true,
+    brainSync: normalizeBrainSync(brainSync),
+  };
+}
+
+function normalizeNoteMetadata(metadata = {}) {
+  const source = metadata.source === "jobel" ? "jobel" : "user";
+  const isJobel = source === "jobel" || metadata.marker === JOBEL_NOTE_MARKER;
+  return {
+    source: isJobel ? "jobel" : "user",
+    marker: isJobel ? JOBEL_NOTE_MARKER : metadata.marker || null,
+    readOnly: isJobel || metadata.readOnly === true,
+    contentFormat: metadata.contentFormat === "markdown" ? "markdown" : "plain",
+  };
+}
+
+function normalizeBrainSync(value = {}) {
+  const status = NOTE_SYNC_STATUSES[value.status] ? value.status : "not_synced";
+  return {
+    status,
+    sourceHash: value.sourceHash || null,
+    memoryId: value.memoryId || null,
+    lastAttemptAt: value.lastAttemptAt || null,
+    syncedAt: value.syncedAt || null,
+    errorCode: value.errorCode || null,
+  };
+}
+
+function cleanClientString(value, max) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > max ? text.slice(0, max).trim() : text;
+}
+
+function noteTitle(note) {
+  return note?.title || (isJobelNote(note) ? "Jobel note" : "Untitled note");
+}
+
+function isJobelNote(note) {
+  return normalizeNoteMetadata(note?.metadata).source === "jobel";
+}
+
+function noteStatus(note) {
+  return note?.brainSync?.status || "not_synced";
+}
+
+function activeNote() {
+  return state.notes.find((note) => note.id === state.activeNoteId) || null;
+}
+
+function noteMatchesFilter(note) {
+  const filter = state.noteFilter;
+  if (filter === "user") return !isJobelNote(note);
+  if (filter === "jobel") return isJobelNote(note);
+  if (filter === "synced") return noteStatus(note) === "synced";
+  if (filter === "pending") return noteStatus(note) === "pending";
+  if (filter === "failed") return noteStatus(note) === "failed";
+  return true;
+}
+
+function startNotesListener(uid) {
+  stopNotesListener();
+  state.notesLoaded = false;
+  state.notes = loadCachedNotes();
+  renderNotesDrawer();
+  const f = state.firestoreModule;
+  const collectionRef = notesCollectionRef();
+  if (!uid || !f || !collectionRef) return;
+  state.notesUnsubscribe = f.onSnapshot(
+    collectionRef,
+    (snap) => {
+      state.notesLoaded = true;
+      state.notes = snap.docs
+        .map(normalizeNoteDoc)
+        .filter(Boolean)
+        .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)));
+      if (state.activeNoteId && !state.notes.some((note) => note.id === state.activeNoteId)) {
+        state.activeNoteId = state.notes[0]?.id || null;
+        fillNoteEditor(activeNote());
+      }
+      cacheNotes();
+      renderNotesDrawer();
+      retryPendingBrainSync();
+    },
+    (error) => {
+      state.notesLoaded = true;
+      log(`Notes failed to load: ${error.code || error.message}`);
+      renderNotesDrawer();
+    },
+  );
+}
+
+function stopNotesListener() {
+  if (typeof state.notesUnsubscribe === "function") {
+    state.notesUnsubscribe();
+  }
+  state.notesUnsubscribe = null;
+}
+
+function openNotesDrawer(panel = "notes") {
+  state.drawerOpen = true;
+  setNotesPanel(panel);
+  els.notesDrawer?.classList.remove("hidden");
+  els.notesDrawer?.setAttribute("aria-hidden", "false");
+  renderNotesDrawer();
+}
+
+function closeNotesDrawer() {
+  state.drawerOpen = false;
+  els.notesDrawer?.classList.add("hidden");
+  els.notesDrawer?.setAttribute("aria-hidden", "true");
+}
+
+function setNotesPanel(panel) {
+  state.notesPanel = panel === "jobel" ? "jobel" : "notes";
+  renderNotesDrawer();
+}
+
+function newNote() {
+  state.activeNoteId = null;
+  fillNoteEditor(null);
+  openNotesDrawer("notes");
+}
+
+function fillNoteEditor(note) {
+  const isReadOnly = note?.metadata?.readOnly === true;
+  els.noteEditorHeading.textContent = note ? (isReadOnly ? "Jobel note" : "Edit note") : "New note";
+  els.noteTitle.value = note?.title || "";
+  els.noteBody.value = note?.body || "";
+  els.noteSyncCheckbox.checked = note?.syncToBrain === true;
+  els.noteTitle.disabled = isReadOnly;
+  els.noteBody.disabled = isReadOnly;
+  els.noteSyncCheckbox.disabled = isReadOnly;
+  els.deleteNoteBtn.disabled = !state.user || !note || state.busy;
+  els.saveNoteBtn.disabled = !state.user || isReadOnly || state.busy;
+  setSyncPill(note);
+}
+
+function setSyncPill(note = activeNote()) {
+  const [label, tone] = NOTE_SYNC_STATUSES[noteStatus(note)] || NOTE_SYNC_STATUSES.not_synced;
+  setPill(els.noteSyncStatus, label, tone);
+}
+
+function renderNotesDrawer() {
+  if (!els.notesDrawer) return;
+  const panel = state.notesPanel;
+  els.notesPanel.classList.toggle("active", panel === "notes");
+  els.jobelPanel.classList.toggle("active", panel === "jobel");
+  els.notesPanelTab.classList.toggle("active", panel === "notes");
+  els.jobelPanelTab.classList.toggle("active", panel === "jobel");
+  els.noteFilter.value = state.noteFilter;
+
+  const visibleNotes = state.notes.filter(noteMatchesFilter);
+  els.notesEmpty.classList.toggle("hidden", Boolean(visibleNotes.length));
+  els.notesEmpty.textContent = state.user
+    ? state.notesLoaded
+      ? "No notes match this view yet."
+      : "Loading notes..."
+    : "Sign in and start a note to build resume context over time.";
+  els.notesList.innerHTML = visibleNotes.map(noteCardHtml).join("");
+  setSyncPill();
+  renderJobelMessages();
+  if (!state.activeNoteId && !els.noteTitle.value && !els.noteBody.value) {
+    fillNoteEditor(null);
+  } else {
+    const note = activeNote();
+    if (note) {
+      els.noteEditorHeading.textContent = note.metadata.readOnly ? "Jobel note" : "Edit note";
+      els.deleteNoteBtn.disabled = !state.user || state.busy;
+      els.saveNoteBtn.disabled = !state.user || note.metadata.readOnly || state.busy;
+      setSyncPill(note);
+    }
+  }
+  els.newNoteBtn.disabled = !state.user || state.busy;
+  els.sendJobelBtn.disabled = !state.user || state.busy || !els.jobelInput.value.trim();
+}
+
+function noteCardHtml(note) {
+  const status = NOTE_SYNC_STATUSES[noteStatus(note)] || NOTE_SYNC_STATUSES.not_synced;
+  const date = note.updatedAt ? shortDate(note.updatedAt) : "";
+  const preview = note.body || "Empty note";
+  return `
+    <button class="note-card ${isJobelNote(note) ? "jobel" : ""} ${note.id === state.activeNoteId ? "active" : ""}" type="button" data-note-id="${escapeHtml(note.id)}">
+      <span class="note-card-head">
+        <strong>${escapeHtml(noteTitle(note))}</strong>
+        <span class="pill ${escapeHtml(status[1])}">${escapeHtml(status[0])}</span>
+      </span>
+      <p>${escapeHtml(clipClientText(preview, 220))}</p>
+      <span class="note-card-meta">
+        <span>${escapeHtml(isJobelNote(note) ? "Jobel" : "Your note")}</span>
+        ${date ? `<span>${escapeHtml(date)}</span>` : ""}
+        ${note.syncToBrain ? "<span>AI Brain sync on</span>" : ""}
+      </span>
+    </button>
+  `;
+}
+
+function clipClientText(value, max) {
+  const text = String(value || "").trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(1, max - 1)).trim()}...`;
+}
+
+async function saveNote(event) {
+  event?.preventDefault();
+  if (!state.user) {
+    log("Sign in before saving notes.");
+    return;
+  }
+  const current = activeNote();
+  if (current?.metadata?.readOnly) {
+    log("Jobel notes are read-only.");
+    return;
+  }
+  const title = cleanClientString(els.noteTitle.value, 120);
+  const body = String(els.noteBody.value || "").trim();
+  if (!title && !body) {
+    log("Write a note before saving.");
+    return;
+  }
+  const now = new Date().toISOString();
+  const syncToBrain = els.noteSyncCheckbox.checked;
+  const payload = withoutClientUndefined({
+    owner: state.user.uid,
+    appId: APP_ID,
+    packageId: state.activePackage?.id || "",
+    title,
+    body,
+    updatedAt: now,
+    createdAt: current?.createdAt || now,
+    metadata: { source: "user", readOnly: false, contentFormat: "plain" },
+    syncToBrain,
+    brainSync: noteBrainSyncForSave(current, syncToBrain),
+  });
+  setBusy(true);
+  try {
+    const f = state.firestoreModule;
+    if (current?.id) {
+      await f.setDoc(noteDocRef(current.id), payload, { merge: true });
+      state.activeNoteId = current.id;
+    } else {
+      const docRef = await f.addDoc(notesCollectionRef(), payload);
+      state.activeNoteId = docRef.id;
+    }
+    log("Note saved.");
+    if (syncToBrain) await syncNoteToBrain(state.activeNoteId);
+  } catch (error) {
+    log(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function noteBrainSyncForSave(current, syncToBrain) {
+  if (!syncToBrain) return { status: "not_synced", sourceHash: null, memoryId: null, syncedAt: null, errorCode: null };
+  if (current?.brainSync?.status === "synced") {
+    return {
+      ...current.brainSync,
+      status: "not_synced",
+      sourceHash: null,
+      syncedAt: null,
+      errorCode: null,
+    };
+  }
+  return current?.brainSync || { status: "not_synced", sourceHash: null, memoryId: null, syncedAt: null, errorCode: null };
+}
+
+async function deleteActiveNote() {
+  const current = activeNote();
+  if (!state.user || !current) return;
+  setBusy(true);
+  try {
+    await state.firestoreModule.deleteDoc(noteDocRef(current.id));
+    state.activeNoteId = null;
+    fillNoteEditor(null);
+    log("Note deleted.");
+  } catch (error) {
+    log(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function syncNoteToBrain(noteId) {
+  if (!state.user || !noteId) return;
+  if (state.syncingNoteIds.has(noteId)) return;
+  state.syncingNoteIds.add(noteId);
+  try {
+    await state.firestoreModule.setDoc(noteDocRef(noteId), {
+      brainSync: {
+        ...(activeNote()?.brainSync || {}),
+        status: "pending",
+        lastAttemptAt: new Date().toISOString(),
+        errorCode: null,
+      },
+    }, { merge: true });
+    const result = await api(`/notes/${encodeURIComponent(noteId)}/sync-brain`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    log(result.skipped ? "Note already synced." : "Note synced to AI Brain.");
+  } catch (error) {
+    log(error.message);
+  } finally {
+    state.syncingNoteIds.delete(noteId);
+  }
+}
+
+function retryPendingBrainSync() {
+  if (!state.user || !navigator.onLine) return;
+  const pending = state.notes.filter((note) => note.syncToBrain && ["pending", "failed"].includes(noteStatus(note))).slice(0, 3);
+  for (const note of pending) {
+    void syncNoteToBrain(note.id);
+  }
+}
+
+function renderJobelMessages() {
+  const stored = state.notes
+    .filter(isJobelNote)
+    .slice(0, 6)
+    .reverse()
+    .map((note) => ({ role: "jobel", content: note.body, createdAt: note.createdAt }));
+  const messages = [...stored, ...state.jobelMessages].slice(-12);
+  els.jobelMessages.innerHTML = messages.length
+    ? messages.map((message) => `
+      <div class="jobel-message ${message.role === "user" ? "user" : "jobel"}">
+        <strong>${message.role === "user" ? "You" : "Jobel"}</strong>
+        <p>${escapeHtml(message.content)}</p>
+      </div>
+    `).join("")
+    : `<div class="notes-empty">Ask Jobel what your resume still needs.</div>`;
+}
+
+async function sendJobelMessage(event) {
+  event.preventDefault();
+  if (!state.user) {
+    log("Sign in before chatting with Jobel.");
+    return;
+  }
+  const message = String(els.jobelInput.value || "").trim();
+  if (!message) return;
+  state.jobelMessages.push({ role: "user", content: message, createdAt: new Date().toISOString() });
+  els.jobelInput.value = "";
+  renderNotesDrawer();
+  setBusy(true);
+  try {
+    const result = await api("/jobel/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        message,
+        packageId: state.activePackage?.id || "",
+        noteIds: state.notes.slice(0, 12).map((note) => note.id),
+      }),
+    });
+    const reply = String(result.reply || "").trim();
+    if (reply) {
+      state.jobelMessages.push({ role: "jobel", content: reply, createdAt: new Date().toISOString() });
+      await createJobelNote(reply);
+      log("Jobel replied.");
+    }
+  } catch (error) {
+    log(error.message);
+  } finally {
+    setBusy(false);
+    renderNotesDrawer();
+  }
+}
+
+async function createJobelNote(reply) {
+  const f = state.firestoreModule;
+  const now = new Date().toISOString();
+  const docRef = await f.addDoc(notesCollectionRef(), {
+    owner: state.user.uid,
+    appId: APP_ID,
+    packageId: state.activePackage?.id || "",
+    title: "Jobel reply",
+    body: reply,
+    createdAt: now,
+    updatedAt: now,
+    metadata: {
+      source: "jobel",
+      marker: JOBEL_NOTE_MARKER,
+      readOnly: true,
+      contentFormat: "markdown",
+    },
+    syncToBrain: false,
+    brainSync: { status: "not_synced", sourceHash: null, memoryId: null, syncedAt: null, errorCode: null },
+  });
+  state.activeNoteId = docRef.id;
+}
+
+function withoutClientUndefined(value) {
+  if (Array.isArray(value)) return value.map(withoutClientUndefined).filter((item) => item !== undefined);
+  if (value && typeof value === "object") {
+    const result = {};
+    for (const [key, entry] of Object.entries(value)) {
+      const cleaned = withoutClientUndefined(entry);
+      if (cleaned !== undefined) result[key] = cleaned;
+    }
+    return result;
+  }
+  return value === undefined ? undefined : value;
+}
+
+async function loadAdminData() {
+  if (!state.access?.admin) return;
+  try {
+    const [summary, users, codes, events] = await Promise.all([
+      api("/admin/summary"),
+      api(`/admin/users?q=${encodeURIComponent(els.adminUserSearch.value.trim())}`),
+      api("/admin/codes"),
+      api("/admin/events"),
+    ]);
+    state.admin.summary = summary.summary || null;
+    state.admin.users = users.users || [];
+    state.admin.codes = codes.codes || [];
+    state.admin.events = events.events || [];
+  } catch (error) {
+    log(error.message);
+  } finally {
+    renderAdmin();
+  }
+}
+
+function renderAdmin() {
+  if (!els.adminPanel) return;
+  const isAdmin = state.access?.admin === true;
+  els.adminPanel.classList.toggle("hidden", !isAdmin);
+  if (!isAdmin) return;
+  setPill(els.adminBadge, "Owner", "good");
+  const summary = state.admin.summary || {};
+  els.adminStats.innerHTML = [
+    ["Users", summary.users ?? 0],
+    ["Unlocked", summary.unlockedPackages ?? 0],
+    ["Active codes", summary.activeCodes ?? 0],
+    ["Paid orders", summary.paidOrders ?? 0],
+  ].map(([label, value]) => `<div class="admin-stat"><strong>${escapeHtml(String(value))}</strong><span>${escapeHtml(label)}</span></div>`).join("");
+
+  els.adminUsers.innerHTML = state.admin.users.length
+    ? state.admin.users.map(adminUserRow).join("")
+    : `<div class="admin-row"><small>No users found yet.</small></div>`;
+  els.adminCodes.innerHTML = state.admin.codes.length
+    ? state.admin.codes.map(adminCodeRow).join("")
+    : `<div class="admin-row"><small>No codes created yet.</small></div>`;
+  els.adminEvents.innerHTML = state.admin.events.length
+    ? state.admin.events.map((event) => `
+      <div class="admin-row">
+        <small>${escapeHtml(shortDate(event.createdAt))}</small>
+        <div>
+          <strong>${escapeHtml(event.eventType || "event")}</strong>
+          <small>${escapeHtml(JSON.stringify(event.metadata || {}))}</small>
+        </div>
+      </div>
+    `).join("")
+    : `<div class="admin-row"><small>No events yet.</small></div>`;
+}
+
+function adminUserRow(user) {
+  return `
+    <div class="admin-row" data-user="${escapeHtml(user.uidHash)}">
+      <div class="admin-row-head">
+        <div>
+          <strong>${escapeHtml(user.email || "Unknown email")}</strong>
+          <small>${escapeHtml(user.uidHash.slice(0, 12))}... ${escapeHtml(user.status)}</small>
+        </div>
+        <span class="pill ${user.freeRemaining > 0 || user.creditBalance > 0 ? "good" : "neutral"}">${escapeHtml(String(user.freeRemaining))} free</span>
+      </div>
+      <div class="admin-row-controls">
+        <input data-admin-field="freeQuota" type="number" min="0" value="${escapeHtml(String(user.freeQuota || 0))}" />
+        <input data-admin-field="freeUsed" type="number" min="0" value="${escapeHtml(String(user.freeUsed || 0))}" />
+        <input data-admin-field="creditBalance" type="number" min="0" value="${escapeHtml(String(user.creditBalance || 0))}" />
+        <button class="button" data-admin-action="save-user" type="button">Save</button>
+        <button class="button" data-admin-action="reset-free" type="button">Reset</button>
+      </div>
+    </div>
+  `;
+}
+
+function adminCodeRow(code) {
+  const uses = code.maxRedemptions === null ? "infinite" : `${code.redeemedCount}/${code.maxRedemptions}`;
+  const value = code.kind === "stripe"
+    ? code.percentOff
+      ? `${code.percentOff}% off`
+      : `${(code.amountOff || 0) / 100} ${code.currency || "usd"}`
+    : `${code.creditAmount} credit`;
+  return `
+    <div class="admin-row" data-code="${escapeHtml(code.id)}">
+      <div class="admin-row-head">
+        <div>
+          <strong>${escapeHtml(code.code)}</strong>
+          <small>${escapeHtml(code.kind)} - ${escapeHtml(value)} - ${escapeHtml(uses)}</small>
+        </div>
+        <span class="pill ${code.status === "active" ? "good" : "bad"}">${escapeHtml(code.status)}</span>
+      </div>
+      <div class="button-row">
+        <button class="button" data-admin-action="revoke-code" type="button" ${code.status !== "active" ? "disabled" : ""}>Revoke</button>
+      </div>
+    </div>
+  `;
+}
+
+async function searchAdminUsers() {
+  await loadAdminData();
+}
+
+async function submitAdminCode(event) {
+  event.preventDefault();
+  setBusy(true);
+  try {
+    const maxRedemptions = els.adminCodeUses.value ? Number(els.adminCodeUses.value) : null;
+    const body = {
+      code: els.adminCodeValue.value.trim(),
+      kind: els.adminCodeKind.value,
+      maxRedemptions,
+      creditAmount: els.adminCodeCreditAmount.value ? Number(els.adminCodeCreditAmount.value) : undefined,
+      percentOff: els.adminCodePercent.value ? Number(els.adminCodePercent.value) : undefined,
+      amountOff: els.adminCodeAmount.value ? Number(els.adminCodeAmount.value) : undefined,
+      currency: "usd",
+    };
+    await api("/admin/codes", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    els.adminCodeForm.reset();
+    els.adminCodeCreditAmount.value = "1";
+    await loadAdminData();
+    log("Admin code created.");
+  } catch (error) {
+    log(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function handleAdminClick(event) {
+  const button = event.target.closest("[data-admin-action]");
+  if (!button) return;
+  const action = button.dataset.adminAction;
+  const userRow = button.closest("[data-user]");
+  const codeRow = button.closest("[data-code]");
+  setBusy(true);
+  try {
+    if (action === "save-user" && userRow) {
+      const uidHash = userRow.dataset.user;
+      const field = (name) => Number(userRow.querySelector(`[data-admin-field="${name}"]`)?.value || 0);
+      await api(`/admin/users/${encodeURIComponent(uidHash)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          freeQuota: field("freeQuota"),
+          freeUsed: field("freeUsed"),
+          creditBalance: field("creditBalance"),
+          userStatus: "active",
+        }),
+      });
+      log("User credits updated.");
+    }
+    if (action === "reset-free" && userRow) {
+      await api(`/admin/users/${encodeURIComponent(userRow.dataset.user)}/reset-free`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      log("Free usage reset.");
+    }
+    if (action === "revoke-code" && codeRow) {
+      await api(`/admin/codes/${encodeURIComponent(codeRow.dataset.code)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "revoked" }),
+      });
+      log("Code revoked.");
+    }
+    await loadAdminData();
+  } catch (error) {
+    log(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function shortDate(value) {
+  if (!value) return "";
+  return new Date(value).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+}
+
 for (const field of [
   els.fullName,
   els.resumeEmail,
@@ -620,6 +1466,7 @@ for (const field of [
   els.jobPost,
   els.workHistory,
   els.notes,
+  els.discountCode,
   els.revisionText,
 ]) {
   field.addEventListener("input", render);
@@ -630,11 +1477,39 @@ els.createAccountBtn.addEventListener("click", createAccount);
 els.googleBtn.addEventListener("click", signInWithGoogle);
 els.signOutBtn.addEventListener("click", signOut);
 els.savePackageBtn.addEventListener("click", savePackage);
+els.claimFreeBtn.addEventListener("click", claimFreePackage);
+els.redeemCodeBtn.addEventListener("click", redeemCode);
 els.checkoutBtn.addEventListener("click", startCheckout);
 els.generateBtn.addEventListener("click", generateDocx);
 els.downloadBtn.addEventListener("click", downloadDocx);
 els.revisionBtn.addEventListener("click", submitRevision);
 els.resumeFile.addEventListener("change", () => extractFileText(els.resumeFile.files?.[0]));
+els.notesLauncherBtn.addEventListener("click", () => openNotesDrawer("notes"));
+els.jobelLauncherBtn.addEventListener("click", () => openNotesDrawer("jobel"));
+els.notesDrawerBackdrop.addEventListener("click", closeNotesDrawer);
+els.closeNotesDrawerBtn.addEventListener("click", closeNotesDrawer);
+els.notesPanelTab.addEventListener("click", () => setNotesPanel("notes"));
+els.jobelPanelTab.addEventListener("click", () => setNotesPanel("jobel"));
+els.noteFilter.addEventListener("change", (event) => {
+  state.noteFilter = event.target.value;
+  renderNotesDrawer();
+});
+els.newNoteBtn.addEventListener("click", newNote);
+els.notesList.addEventListener("click", (event) => {
+  const card = event.target.closest("[data-note-id]");
+  if (!card) return;
+  state.activeNoteId = card.dataset.noteId;
+  fillNoteEditor(activeNote());
+  renderNotesDrawer();
+});
+els.noteEditorForm.addEventListener("submit", saveNote);
+els.deleteNoteBtn.addEventListener("click", deleteActiveNote);
+els.jobelInput.addEventListener("input", renderNotesDrawer);
+els.jobelForm.addEventListener("submit", sendJobelMessage);
+window.addEventListener("online", retryPendingBrainSync);
+els.adminUserSearchBtn.addEventListener("click", searchAdminUsers);
+els.adminCodeForm.addEventListener("submit", submitAdminCode);
+els.adminPanel.addEventListener("click", handleAdminClick);
 
 render();
 checkHealth();
