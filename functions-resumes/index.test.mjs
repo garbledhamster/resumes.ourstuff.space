@@ -294,6 +294,7 @@ describe("ResumeDoc generator", () => {
     expect(payloads.map((payload) => payload.max_tokens)).toEqual([2600, 2380, 2600, 2600, 940, 1150]);
     expect(payloads.every((payload) => payload.reasoning?.effort === "low")).toBe(true);
     expect(payloads.every((payload) => payload.reasoning?.exclude === true)).toBe(true);
+    expect(payloads.every((payload) => !payload.tools && !payload.plugins)).toBe(true);
     expect(prompts[0].input_context.source_chunks.map((chunk) => chunk.type)).toContain("work_history");
     expect(prompts[3].input_context.source_chunks.some((chunk) => chunk.type === "work_history")).toBe(false);
     expect(prompts[0].instructions.join(" ")).toContain("Faithfully reformulate");
@@ -301,6 +302,50 @@ describe("ResumeDoc generator", () => {
     expect(prompts[0].input_context.strict_document_rules.join(" ")).toContain("job-post text into candidate history");
     expect(prompts[1].input_context.working_memory.section_summaries).toContain("page_1: page_1 memory");
     expect(response.generation_memory.section_summaries).toContain("references: references memory");
+  });
+
+  it("finishes the packet with a section fallback when OpenRouter returns empty JSON", async () => {
+    process.env.OPENROUTER_API_KEY = "test-openrouter-key";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const input = sampleInput();
+    const baseline = api.localResponseFromInput(input);
+    const calls = [];
+    globalThis.fetch = vi.fn(async (_url, options) => {
+      const payload = JSON.parse(options.body);
+      const prompt = JSON.parse(payload.messages[1].content);
+      calls.push(prompt.section);
+      if (prompt.section === "profile_cards") {
+        return responseText("");
+      }
+      return responseJson({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              [prompt.section]: prompt.current_safe_draft,
+              memory: { summary: `${prompt.section} memory` },
+            }),
+          },
+        }],
+      });
+    });
+
+    const response = await api.buildPacketResponseWithOpenRouter(input, "");
+
+    expect(calls).toEqual([
+      "page_1",
+      "skill_tracker",
+      "interview_prep",
+      "company_role_brief",
+      "profile_cards",
+      "profile_cards",
+      "references",
+    ]);
+    expect(response.profile_cards).toEqual(baseline.profile_cards);
+    expect(response.generation_memory.section_summaries).toContain("profile_cards: Used source-checked fallback for profile cards.");
+    const output = await api.buildDocx(api.validateResponse(response, input), input);
+    const text = await api.extractDocxText(output.docx);
+    expect(text).toContain("Jane Applicant");
+    expect(text).toContain("OPERATIONS COORDINATOR");
   });
 });
 
@@ -512,5 +557,15 @@ function responseJson(body, status = 200) {
     statusText: status >= 200 && status < 300 ? "OK" : "Error",
     text: async () => JSON.stringify(body),
     json: async () => body,
+  };
+}
+
+function responseText(text, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status >= 200 && status < 300 ? "OK" : "Error",
+    text: async () => text,
+    json: async () => JSON.parse(text),
   };
 }

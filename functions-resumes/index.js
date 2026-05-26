@@ -1408,10 +1408,9 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction, opt
       },
       instructions: [
         "Faithfully reformulate one company-and-role brief page only.",
-        "Use the job posting first. Use public company context only when clearly supported.",
+        "Use the job posting and supplied source context first.",
         "If company facts are uncertain, write job-derived facts instead of guessing.",
       ],
-      allowWeb: true,
       sourceTypes: ["candidate_profile", "job_overview", "job_responsibilities", "job_requirements"],
     },
     {
@@ -1424,7 +1423,6 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction, opt
         "Use Hiring Team when a named interviewer is not clearly supported.",
         "Do not invent biography details for an interviewer.",
       ],
-      allowWeb: true,
       sourceTypes: ["candidate_profile", "job_overview"],
     },
     {
@@ -1457,13 +1455,59 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction, opt
   let packetMemory = initialPacketMemory(context);
   for (const task of sectionTasks) {
     await appendPackageActivity(options.packageId, `draft_${task.key}`, `Jobel is drafting ${task.label}.`, "info");
-    const sectionResult = await callOpenRouterSection(context, task, packetMemory);
+    let sectionResult;
+    try {
+      sectionResult = await callOpenRouterSection(context, task, packetMemory);
+    } catch (error) {
+      if (!isRetryableOpenRouterSectionError(error)) {
+        throw error;
+      }
+      console.warn("openrouter_section_fallback", task.key, error.message);
+      await appendPackageActivity(
+        options.packageId,
+        `draft_fallback_${task.key}`,
+        `Jobel could not get stable AI JSON for ${task.label}, so it is using the conservative source-checked draft for that section.`,
+        "warn",
+      );
+      sectionResult = fallbackSectionResult(task, error);
+    }
     output[task.key] = sectionResult.output;
+    try {
+      validateResponse(output, input);
+    } catch (error) {
+      console.warn("openrouter_section_invalid", task.key, error.message);
+      await appendPackageActivity(
+        options.packageId,
+        `draft_fallback_${task.key}`,
+        `Jobel received an incomplete AI draft for ${task.label}, so it is using the conservative source-checked draft for that section.`,
+        "warn",
+      );
+      sectionResult = fallbackSectionResult(task, error);
+      output[task.key] = sectionResult.output;
+      validateResponse(output, input);
+    }
     packetMemory = mergePacketMemory(packetMemory, sectionResult.memory, task, output[task.key]);
     await appendPackageActivity(options.packageId, `drafted_${task.key}`, `Jobel finished ${task.label} and carried forward the source notes.`, "good");
   }
   output.generation_memory = packetMemory;
   return output;
+}
+
+function fallbackSectionResult(task, error) {
+  return {
+    output: task.value,
+    memory: normalizeSectionMemory({
+      summary: `Used source-checked fallback for ${task.label}.`,
+      placeholders_or_unknowns: [`AI section draft was unavailable: ${clipText(error?.message, 160, "unknown error")}`],
+    }, task, task.value),
+  };
+}
+
+function isRetryableOpenRouterSectionError(error) {
+  if (!error) return true;
+  if (error.code === "openrouter_credit_limit" || error.code === "openrouter_auth_failed") return false;
+  if (error.statusCode && error.statusCode < 500 && error.statusCode !== 429) return false;
+  return true;
 }
 
 function noteSourceHash(note) {
@@ -2074,7 +2118,32 @@ async function callOpenRouterJson(systemPrompt, userPrompt, options = {}) {
       },
     ];
   }
-  const raw = await postOpenRouter(payload).catch(async (error) => {
+  const raw = await postOpenRouterWithCompatibilityFallback(payload);
+  try {
+    return parseOpenRouterJson(raw);
+  } catch (error) {
+    if (error.code !== "openrouter_bad_json") {
+      throw error;
+    }
+    const retryPayload = JSON.parse(JSON.stringify(payload));
+    delete retryPayload.tools;
+    delete retryPayload.plugins;
+    retryPayload.temperature = 0.1;
+    retryPayload.messages = [
+      ...retryPayload.messages,
+      {
+        role: "user",
+        content: "Your previous response was not usable JSON. Return one valid JSON object only, with no markdown or surrounding text.",
+      },
+    ];
+    console.warn("openrouter_json_retry", error.message);
+    const retryRaw = await postOpenRouterWithCompatibilityFallback(retryPayload);
+    return parseOpenRouterJson(retryRaw);
+  }
+}
+
+async function postOpenRouterWithCompatibilityFallback(payload) {
+  return postOpenRouter(payload).catch(async (error) => {
     const message = String(error.message || "");
     const fallback = JSON.parse(JSON.stringify(payload));
     if (error.code === "openrouter_credit_limit" && error.affordableTokens && payload.max_tokens > 350) {
@@ -2094,12 +2163,35 @@ async function callOpenRouterJson(systemPrompt, userPrompt, options = {}) {
     }
     throw error;
   });
-  const data = JSON.parse(raw);
+}
+
+function parseOpenRouterJson(raw) {
+  let data;
+  try {
+    data = JSON.parse(String(raw || ""));
+  } catch (error) {
+    throw openRouterBadJsonError("OpenRouter returned an empty or invalid response envelope.", raw, error);
+  }
   let content = data?.choices?.[0]?.message?.content;
   if (Array.isArray(content)) {
     content = content.map((part) => (typeof part === "object" ? part.text || "" : String(part))).join("");
   }
-  return parseJsonObject(String(content || ""));
+  const text = String(content || "").trim();
+  if (!text) {
+    throw openRouterBadJsonError("OpenRouter returned an empty assistant message.", raw);
+  }
+  try {
+    return parseJsonObject(text);
+  } catch (error) {
+    throw openRouterBadJsonError("OpenRouter assistant message was not valid JSON.", text, error);
+  }
+}
+
+function openRouterBadJsonError(message, raw, cause) {
+  const error = httpError(502, message, "openrouter_bad_json");
+  error.rawPreview = String(raw || "").slice(0, 300);
+  if (cause) error.cause = cause;
+  return error;
 }
 
 async function postOpenRouter(payload) {

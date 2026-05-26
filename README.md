@@ -28,6 +28,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\github-ready.ps1 -Ui
 
 Reports are written to `artifacts\frontend-validation`.
 
+The ready check also runs a no-cost DOCX smoke harness that builds three
+different packets and extracts their text for inspection:
+
+```powershell
+node .\scripts\resumedoc-docx-smoke.mjs --mode=local
+```
+
+Outputs are written under `artifacts\docx-smoke\<timestamp>\` with a `.docx`,
+readable `.txt`, and report for each run. Use `--mode=openrouter` only when you
+intentionally want to spend OpenRouter credits on the same three-case pass.
+
 ## Deploy Notes
 
 Use targeted deploys for the shared Firebase project:

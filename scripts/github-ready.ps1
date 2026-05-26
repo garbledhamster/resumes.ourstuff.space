@@ -99,6 +99,7 @@ function Test-RequiredFile {
 Invoke-Logged "frontend syntax" "node --check app.js" $Root | Out-Null
 Invoke-Logged "functions syntax" "npm run typecheck" (Join-Path $Root "functions-resumes") | Out-Null
 Invoke-Logged "functions tests" "npm test" (Join-Path $Root "functions-resumes") | Out-Null
+Invoke-Logged "docx smoke tests" "node scripts\resumedoc-docx-smoke.mjs --mode=local" $Root | Out-Null
 
 if (-not $SkipWorker) {
   $WorkerRoot = "C:\Codex\stripe-worker-api"
