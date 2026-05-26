@@ -66,6 +66,7 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     service: "resumedoc-api",
     promptVersion: PROMPT_VERSION,
+    templateAsset: templateAssetInfo(),
   });
 });
 
@@ -536,6 +537,24 @@ function db() {
 
 function bucket() {
   return admin.storage().bucket();
+}
+
+function templateAssetInfo() {
+  try {
+    const buffer = fs.readFileSync(TEMPLATE_PATH);
+    return {
+      present: true,
+      fileName: path.basename(TEMPLATE_PATH),
+      size: buffer.length,
+      sha256: crypto.createHash("sha256").update(buffer).digest("hex"),
+    };
+  } catch (error) {
+    return {
+      present: false,
+      fileName: path.basename(TEMPLATE_PATH),
+      error: error.code || "template_read_failed",
+    };
+  }
 }
 
 function packageRef(id) {
@@ -1766,7 +1785,6 @@ async function buildDocx(response, input) {
   applyCompanyRoleBrief(topParagraphs, response);
   applyProfileCards(topParagraphs, response, input);
   applyReferences(topParagraphs, response);
-  removeEmbeddedTrackerParagraph(body);
   ensureSectionPageBreaks(dom, body, response);
   updateImageAltText(dom, response, input);
 
@@ -1782,6 +1800,7 @@ async function buildDocx(response, input) {
   const interviewer = response.profile_cards.interviewer || {};
   const interviewee = response.profile_cards.interviewee || {};
   const replacementImages = [
+    await renderTrackerImage(response, accent),
     await renderProfileImage(interviewer.name || "Hiring Team", interviewer.title || response.company, accent, false),
     await renderProfileImage(interviewee.name || input.fullName || "Candidate", interviewee.title || response.role, accent, true),
   ];
@@ -1789,8 +1808,7 @@ async function buildDocx(response, input) {
     zip.file(relTargets[index], replacementImages[index]);
   }
   const docx = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
-  const trackerPng = await renderTrackerImage(response, accent);
-  return { docx, trackerPng };
+  return { docx, trackerPng: replacementImages[0] };
 }
 
 function applyPageOne(table, topParagraphs, response, input) {
@@ -2019,6 +2037,7 @@ function updateImageAltText(dom, response, input) {
   }
   const cards = response.profile_cards || {};
   const replacements = [
+    response.skill_tracker?.headline || `${response.role || "Role"} Match Tracker`,
     cards.interviewer?.name || "Hiring Team",
     cards.interviewee?.name || input.fullName || "Candidate",
   ];
@@ -2070,24 +2089,48 @@ function escapeRegExp(value) {
 async function imageTargetsFromDocument(zip, relsPath, documentDom) {
   const relXml = await zip.file(relsPath).async("string");
   const relDom = new DOMParser().parseFromString(relXml, "application/xml");
-  const rels = {};
+  const rels = new Map();
   const relNodes = relDom.getElementsByTagName("Relationship");
   for (let i = 0; i < relNodes.length; i += 1) {
     const id = relNodes[i].getAttribute("Id");
     const target = relNodes[i].getAttribute("Target");
     if (id && target && target.startsWith("media/")) {
-      rels[id] = `word/${target}`;
+      rels.set(id, { node: relNodes[i], target: `word/${target}` });
     }
   }
   const targets = [];
   const nodes = documentDom.getElementsByTagName("*");
   for (let i = 0; i < nodes.length; i += 1) {
-    if (nodes[i].localName === "blip") {
-      const rid = nodes[i].getAttribute("r:embed") || nodes[i].getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "embed");
-      if (rid && rels[rid]) targets.push(rels[rid]);
+    if (nodes[i].localName === "blip" || nodes[i].localName === "imagedata") {
+      const rid = nodes[i].getAttribute("r:embed")
+        || nodes[i].getAttribute("r:id")
+        || nodes[i].getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "embed")
+        || nodes[i].getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id");
+      const rel = rid ? rels.get(rid) : null;
+      if (rel) {
+        const pngTarget = pngTargetForImage(rel.target);
+        rel.node.setAttribute("Target", pngTarget.replace(/^word\//, ""));
+        targets.push(pngTarget);
+      }
     }
   }
+  zip.file(relsPath, new XMLSerializer().serializeToString(relDom));
+  await ensurePngContentType(zip);
   return targets;
+}
+
+function pngTargetForImage(target) {
+  return target.replace(/\.[A-Za-z0-9]+$/, ".png");
+}
+
+async function ensurePngContentType(zip) {
+  const contentTypesPath = "[Content_Types].xml";
+  const file = zip.file(contentTypesPath);
+  if (!file) return;
+  const xml = await file.async("string");
+  if (/Extension="png"/i.test(xml)) return;
+  const updated = xml.replace("</Types>", '<Default Extension="png" ContentType="image/png"/></Types>');
+  zip.file(contentTypesPath, updated);
 }
 
 async function renderProfileImage(name, title, accentHex, wide) {

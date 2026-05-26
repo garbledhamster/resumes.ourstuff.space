@@ -83,6 +83,24 @@ describe("ResumeDoc generator", () => {
     expect((xml.match(/w:type="page"/g) || [])).toHaveLength(4);
   });
 
+  it("keeps the template visual slots inside the DOCX", async () => {
+    const input = sampleInput();
+    const response = api.validateResponse(api.localResponseFromInput(input), input);
+    const output = await api.buildDocx(response, input);
+    const zip = await JSZip.loadAsync(output.docx);
+    const rels = await zip.file("word/_rels/document.xml.rels").async("string");
+    const mediaTargets = [...rels.matchAll(/Target="([^"]*media\/[^"]+)"/g)].map((match) => match[1]);
+
+    expect(mediaTargets).toContain("media/image1.png");
+    expect(mediaTargets).toContain("media/image2.png");
+    expect(mediaTargets).toContain("media/image3.png");
+    for (const mediaPath of ["word/media/image1.png", "word/media/image2.png", "word/media/image3.png"]) {
+      const bytes = await zip.file(mediaPath).async("nodebuffer");
+      expect(bytes.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+      expect(bytes.length).toBeGreaterThan(5000);
+    }
+  });
+
   it("does not reuse resume headers or noisy role labels in fallback text", () => {
     const input = api.normalizeInput({
       ...sampleInput(),
