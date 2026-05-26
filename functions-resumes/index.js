@@ -17,7 +17,7 @@ const AI_BRAIN_API_TOKEN_SECRET = defineSecret("AI_BRAIN_API_TOKEN");
 
 const TEMPLATE_PATH = path.join(__dirname, "assets", "interview-packet-template.docx");
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const PROMPT_VERSION = "2026-05-26-resumedoc-segmented-packet";
+const PROMPT_VERSION = "2026-05-26-resumedoc-chunk-memory";
 const RESUMEDOC_APP_ID = "resumedoc";
 const JOBEL_NOTE_MARKER = "ai:jobel-note";
 const AI_BRAIN_DEFAULT_BASE = "https://api.ourstuff.space/v1";
@@ -37,6 +37,9 @@ const WHY_JOIN_COUNT = 4;
 const REFERENCE_COUNT = 3;
 const MAX_TEXT = 70000;
 const MAX_FILE_BYTES = 7 * 1024 * 1024;
+const MAX_AI_CHUNK_CHARS = 2200;
+const MAX_SECTION_CONTEXT_CHARS = 7200;
+const MAX_MEMORY_ITEMS = 12;
 const LEFTOVER_TERMS = [
   "Joseph",
   "Joe Rice",
@@ -449,12 +452,16 @@ exports.resumeApi = onRequest(
 exports._test = {
   buildDocx,
   buildBrainNoteText,
+  buildPacketResponseWithOpenRouter,
   buildJobelPrompt,
+  cleanMultilineTextForAi,
   rememberNoteInBrain,
   localResponseFromInput,
   normalizeInput,
   normalizeResumeNote,
   noteSourceHash,
+  packetPromptContext,
+  sectionContextForTask,
   shouldSkipBrainSync,
   validateResponse,
   extractDocxText,
@@ -859,6 +866,7 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
         "Return concise text that will fit existing Word template paragraphs.",
         "Do not return colors, style, layout, page-break, markdown, or DOCX instructions.",
       ],
+      sourceTypes: ["candidate_profile", "work_history", "job_requirements", "notes"],
     },
     {
       key: "skill_tracker",
@@ -875,6 +883,7 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
         "Use short phrases for chips and concise proof points.",
         "Do not invent metrics, certifications, employers, tools, or dates.",
       ],
+      sourceTypes: ["candidate_profile", "work_history", "job_requirements"],
     },
     {
       key: "interview_prep",
@@ -890,6 +899,7 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
         "Stories must be prompts grounded in supplied work history, not new claims.",
         "Keep every line short enough for a one-page interview sheet.",
       ],
+      sourceTypes: ["candidate_profile", "work_history", "job_responsibilities", "notes"],
     },
     {
       key: "company_role_brief",
@@ -908,6 +918,7 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
         "If company facts are uncertain, write job-derived facts instead of guessing.",
       ],
       allowWeb: true,
+      sourceTypes: ["candidate_profile", "job_overview", "job_responsibilities", "job_requirements"],
     },
     {
       key: "profile_cards",
@@ -920,6 +931,7 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
         "Do not invent biography details for an interviewer.",
       ],
       allowWeb: true,
+      sourceTypes: ["candidate_profile", "job_overview"],
     },
     {
       key: "references",
@@ -930,6 +942,7 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
         "Return only reference placeholders unless the candidate explicitly supplied reference details.",
         "Do not invent names, employers, emails, phone numbers, or relationships.",
       ],
+      sourceTypes: ["candidate_profile", "notes"],
     },
   ];
 
@@ -947,9 +960,13 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
     research_sources: [],
   };
 
+  let packetMemory = initialPacketMemory(context);
   for (const task of sectionTasks) {
-    output[task.key] = await callOpenRouterSection(context, task);
+    const sectionResult = await callOpenRouterSection(context, task, packetMemory);
+    output[task.key] = sectionResult.output;
+    packetMemory = mergePacketMemory(packetMemory, sectionResult.memory, task, output[task.key]);
   }
+  output.generation_memory = packetMemory;
   return output;
 }
 
@@ -1199,25 +1216,34 @@ function buildPrompt(input, revisionInstruction) {
 }
 
 function packetPromptContext(input, revisionInstruction, baseline) {
+  const cleanInput = normalizeInput(input);
+  const job = extractJobContext(cleanInput.jobPost, cleanInput.targetRole);
+  const workEvidence = candidateEvidenceLines(cleanInput.workHistory);
   return {
     prompt_version: PROMPT_VERSION,
-    candidate_input: {
-      fullName: input.fullName,
-      email: input.email,
-      phone: input.phone,
-      location: input.location,
-      targetRole: input.targetRole,
-      workHistory: input.workHistory,
-      notes: input.notes,
+    candidate_identity: {
+      fullName: cleanInput.fullName,
+      email: cleanInput.email,
+      phone: cleanInput.phone,
+      location: cleanInput.location,
     },
-    job_description_or_posting: input.jobPost,
+    target_context: {
+      targetRole: cleanInput.targetRole,
+      inferred_company: baseline.company,
+      inferred_role: baseline.role,
+    },
     revision_instruction: revisionInstruction || "",
-    inferred_company: baseline.company,
-    inferred_role: baseline.role,
+    source_digest: {
+      work_evidence: workEvidence.slice(0, 10),
+      job_responsibilities: job.responsibilities.slice(0, RESPONSIBILITY_COUNT),
+      job_requirements: job.requirements.slice(0, REQUIREMENT_COUNT),
+      notes: clipText(cleanInput.notes, 900),
+    },
+    source_chunks: buildAiSourceChunks(cleanInput, job, workEvidence),
     strict_document_rules: [
       "The Word template owns all styling, color, layout, page breaks, bullets, tables, and images.",
       "Return text values only. Never request a color change or structural change.",
-      "Use only candidate facts found in candidate_input.",
+      "Use only candidate facts found in the selected source chunks.",
       "Do not invent degrees, certifications, exact dates, software systems, employers, metrics, references, or interviewer biography.",
       "Use placeholders for unknown private details.",
       "Keep text compact so it fits the fixed template slots.",
@@ -1226,27 +1252,238 @@ function packetPromptContext(input, revisionInstruction, baseline) {
   };
 }
 
-async function callOpenRouterSection(context, task) {
+function buildAiSourceChunks(input, job, workEvidence) {
+  const chunks = [
+    aiChunk("candidate.profile", "candidate_profile", "Candidate identity and target", [
+      `Name: ${input.fullName || "[Full Name]"}`,
+      `Target role: ${input.targetRole || job.role || "[Target Role]"}`,
+      `Location: ${input.location || "[Location]"}`,
+      `Email: ${input.email || "[Email]"}`,
+      `Phone: ${input.phone || "[Phone]"}`,
+    ].join("\n")),
+    aiChunk("job.overview", "job_overview", "Job overview and likely company", [
+      `Inferred company: ${job.company || "Target Company"}`,
+      `Inferred role: ${job.role || input.targetRole || "Target Role"}`,
+      ...job.lines.slice(0, 8),
+    ].join("\n")),
+    aiChunk("job.responsibilities", "job_responsibilities", "Job responsibilities", job.responsibilities.join("\n")),
+    aiChunk("job.requirements", "job_requirements", "Job requirements", job.requirements.join("\n")),
+  ];
+
+  for (const [index, chunk] of chunkLines(workEvidence, MAX_AI_CHUNK_CHARS).entries()) {
+    chunks.push(aiChunk(`work.history.${index + 1}`, "work_history", `Candidate work evidence chunk ${index + 1}`, chunk.join("\n")));
+  }
+  if (input.notes) {
+    for (const [index, chunk] of chunkText(input.notes, MAX_AI_CHUNK_CHARS).entries()) {
+      chunks.push(aiChunk(`candidate.notes.${index + 1}`, "notes", `Candidate notes chunk ${index + 1}`, chunk));
+    }
+  }
+  return chunks.filter((chunk) => chunk.text);
+}
+
+function aiChunk(id, type, title, text) {
+  return {
+    id,
+    type,
+    title,
+    text: clipMultilineText(text, MAX_AI_CHUNK_CHARS),
+  };
+}
+
+function chunkLines(lines, maxChars) {
+  const chunks = [];
+  let current = [];
+  let size = 0;
+  for (const line of lines) {
+    const clean = clipText(line, 500);
+    if (!clean) continue;
+    if (current.length && size + clean.length + 1 > maxChars) {
+      chunks.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(clean);
+    size += clean.length + 1;
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
+function chunkText(text, maxChars) {
+  const lines = clipMultilineText(text, MAX_TEXT).split("\n").filter(Boolean);
+  const lineChunks = chunkLines(lines, maxChars);
+  if (lineChunks.length) return lineChunks.map((chunk) => chunk.join("\n"));
+  const value = clipMultilineText(text, MAX_TEXT);
+  const chunks = [];
+  for (let index = 0; index < value.length; index += maxChars) {
+    chunks.push(value.slice(index, index + maxChars).trim());
+  }
+  return chunks.filter(Boolean);
+}
+
+function sectionContextForTask(context, task, packetMemory = initialPacketMemory(context)) {
+  const sourceChunks = selectSourceChunks(context.source_chunks || [], task.sourceTypes || []);
+  return {
+    prompt_version: context.prompt_version,
+    candidate_identity: context.candidate_identity,
+    target_context: context.target_context,
+    revision_instruction: context.revision_instruction,
+    source_chunk_policy: "Use these selected chunks only. If a fact is not present here or in working memory, leave it general or use a placeholder.",
+    source_chunks: limitChunksByChars(sourceChunks, MAX_SECTION_CONTEXT_CHARS),
+    working_memory: compactPacketMemory(packetMemory),
+    strict_document_rules: context.strict_document_rules,
+  };
+}
+
+function selectSourceChunks(chunks, sourceTypes) {
+  const allowed = new Set(sourceTypes);
+  return chunks.filter((chunk) => allowed.has(chunk.type));
+}
+
+function limitChunksByChars(chunks, maxChars) {
+  const selected = [];
+  let total = 0;
+  for (const chunk of chunks) {
+    const size = chunk.text.length;
+    if (selected.length && total + size > maxChars) break;
+    selected.push(chunk);
+    total += size;
+  }
+  return selected;
+}
+
+function initialPacketMemory(context) {
+  return {
+    prompt_version: context.prompt_version,
+    target: context.target_context,
+    section_summaries: [],
+    facts_used: [],
+    candidate_claims_used: [],
+    job_points_used: [],
+    placeholders_or_unknowns: [],
+    style_notes: [],
+  };
+}
+
+function compactPacketMemory(memory) {
+  return {
+    target: memory.target,
+    section_summaries: (memory.section_summaries || []).slice(-6),
+    facts_used: (memory.facts_used || []).slice(-MAX_MEMORY_ITEMS),
+    candidate_claims_used: (memory.candidate_claims_used || []).slice(-MAX_MEMORY_ITEMS),
+    job_points_used: (memory.job_points_used || []).slice(-MAX_MEMORY_ITEMS),
+    placeholders_or_unknowns: (memory.placeholders_or_unknowns || []).slice(-MAX_MEMORY_ITEMS),
+    style_notes: (memory.style_notes || []).slice(-MAX_MEMORY_ITEMS),
+  };
+}
+
+function normalizeSectionMemory(memory, task, sectionOutput) {
+  const raw = memory && typeof memory === "object" && !Array.isArray(memory) ? memory : {};
+  return {
+    section: task.key,
+    summary: clipText(raw.summary || summarizeSectionOutput(task.key, sectionOutput), 360),
+    facts_used: cleanMemoryList(raw.facts_used),
+    candidate_claims_used: cleanMemoryList(raw.candidate_claims_used),
+    job_points_used: cleanMemoryList(raw.job_points_used),
+    placeholders_or_unknowns: cleanMemoryList(raw.placeholders_or_unknowns),
+    style_notes: cleanMemoryList(raw.style_notes),
+  };
+}
+
+function mergePacketMemory(packetMemory, sectionMemory, task, sectionOutput) {
+  const memory = sectionMemory || normalizeSectionMemory(null, task, sectionOutput);
+  return {
+    ...packetMemory,
+    section_summaries: capMemoryList([
+      ...(packetMemory.section_summaries || []),
+      `${task.key}: ${memory.summary}`,
+    ]),
+    facts_used: capMemoryList([...(packetMemory.facts_used || []), ...(memory.facts_used || [])]),
+    candidate_claims_used: capMemoryList([...(packetMemory.candidate_claims_used || []), ...(memory.candidate_claims_used || [])]),
+    job_points_used: capMemoryList([...(packetMemory.job_points_used || []), ...(memory.job_points_used || [])]),
+    placeholders_or_unknowns: capMemoryList([...(packetMemory.placeholders_or_unknowns || []), ...(memory.placeholders_or_unknowns || [])]),
+    style_notes: capMemoryList([...(packetMemory.style_notes || []), ...(memory.style_notes || [])]),
+  };
+}
+
+function cleanMemoryList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => clipText(item, 220)).filter(Boolean).slice(0, 6);
+}
+
+function capMemoryList(items) {
+  const seen = new Set();
+  const result = [];
+  for (const item of items) {
+    const value = clipText(item, 260);
+    const key = value.toLowerCase();
+    if (value && !seen.has(key)) {
+      seen.add(key);
+      result.push(value);
+    }
+  }
+  return result.slice(-MAX_MEMORY_ITEMS);
+}
+
+function summarizeSectionOutput(sectionKey, sectionOutput) {
+  if (!sectionOutput || typeof sectionOutput !== "object") return `Completed ${sectionKey}.`;
+  if (sectionKey === "page_1") return `Wrote resume summary and ${Array.isArray(sectionOutput.experience_bullets) ? sectionOutput.experience_bullets.length : 0} experience bullets.`;
+  if (sectionKey === "skill_tracker") return "Wrote skill tracker proof points and talking points.";
+  if (sectionKey === "interview_prep") return "Wrote interview prep bullets, stories, and questions.";
+  if (sectionKey === "company_role_brief") return "Wrote company and role context from the selected job chunks.";
+  if (sectionKey === "profile_cards") return "Wrote interviewer and interviewee profile cards.";
+  if (sectionKey === "references") return "Kept references as placeholders unless supplied.";
+  return `Completed ${sectionKey}.`;
+}
+
+async function callOpenRouterSection(context, task, packetMemory) {
   const systemPrompt = [
     "You are a careful resume packet editor.",
-    "Return strict JSON only for the requested section.",
+    "Return strict JSON only for the requested section and its compact memory.",
     "You may rewrite text, but the DOCX template controls all layout and styling.",
     "Never invent candidate facts.",
+    "Use only the selected source chunks and the working memory.",
   ].join(" ");
+  const sectionContext = sectionContextForTask(context, task, packetMemory);
   const userPrompt = {
     section: task.key,
     label: task.label,
     instructions: task.instructions,
     exact_counts: task.counts,
-    input_context: context,
+    input_context: sectionContext,
     current_safe_draft: task.value,
     output_schema_for_this_section: outputSchema()[task.key],
+    response_contract: {
+      [task.key]: "The completed section object only.",
+      memory: {
+        summary: "One short sentence describing what this section wrote.",
+        facts_used: ["Short source-grounded facts this section relied on."],
+        candidate_claims_used: ["Candidate claims actually used, copied or compressed from the selected chunks."],
+        job_points_used: ["Job requirements or responsibilities actually used."],
+        placeholders_or_unknowns: ["Unknown details that stayed as placeholders or need user confirmation."],
+        style_notes: ["Concise wording choices future sections should preserve."],
+      },
+    },
   };
   const response = await callOpenRouterJson(systemPrompt, JSON.stringify(userPrompt, null, 2), {
     allowWeb: task.allowWeb === true,
     maxTokens: 2200,
   });
-  return response?.[task.key] && typeof response[task.key] === "object" ? response[task.key] : response;
+  const sectionOutput = response?.[task.key] && typeof response[task.key] === "object"
+    ? response[task.key]
+    : response?.output && typeof response.output === "object"
+      ? response.output
+      : stripModelMemoryKey(response);
+  return {
+    output: sectionOutput,
+    memory: normalizeSectionMemory(response?.memory, task, sectionOutput),
+  };
+}
+
+function stripModelMemoryKey(response) {
+  if (!response || typeof response !== "object" || Array.isArray(response)) return response;
+  const { memory: _memory, ...sectionOutput } = response;
+  return sectionOutput;
 }
 
 function openRouterPacketModel() {
@@ -2015,16 +2252,61 @@ function normalizeInput(value) {
 }
 
 function clipMultilineText(value, limit) {
-  const text = asText(value)
-    .replace(/&nbsp;/gi, " ")
+  const text = cleanMultilineTextForAi(value)
     .replace(/\r\n?/g, "\n")
     .split("\n")
     .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .filter((line, index, lines) => line || lines[index - 1])
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   if (!limit || text.length <= limit) return text;
   return text.slice(0, limit).replace(/\s+\S*$/, "").trim();
+}
+
+function cleanMultilineTextForAi(value) {
+  return decodeBasicEntities(asText(value))
+    .normalize("NFKC")
+    .replace(/\u0000/g, "")
+    .replace(/[\u200b-\u200d\ufeff]/g, "")
+    .replace(/\u00a0/g, " ")
+    .replace(/<\s*br\s*\/?>/gi, "\n")
+    .replace(/<\s*li[^>]*>/gi, "\n- ")
+    .replace(/<\/\s*(?:p|div|li|h[1-6]|tr)\s*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[\u2018\u2019\u201a\u201b]/g, "'")
+    .replace(/[\u201c\u201d\u201e\u201f]/g, '"')
+    .replace(/[\u2013-\u2015]/g, " - ")
+    .replace(/[\u2010-\u2012\u2212]/g, "-")
+    .replace(/\u2026/g, "...")
+    .replace(/[\u2022\u2023\u2043\u25e6\u25cf\u2219]/g, "\n- ")
+    .replace(/\u00e2\u20ac[\u00a2\u00a6]/g, "\n- ")
+    .replace(/\u00e2\u2014[\u0080-\u009f]?/g, "\n- ")
+    .replace(/\u00e2\u20ac[\u201c\u201d]/g, " - ")
+    .replace(/\u00e2\u20ac\u2122/g, "'")
+    .replace(/\u00e2\u20ac[\u0153\u009c]/g, '"')
+    .replace(/\u00e2\u20ac[\u009d\ufffd]/g, '"')
+    .replace(/\u00c2/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n");
+}
+
+function decodeBasicEntities(value) {
+  return asText(value)
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_match, code) => {
+      const number = Number(code);
+      return Number.isFinite(number) && number >= 0 && number <= 0x10ffff ? String.fromCodePoint(number) : "";
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => {
+      const number = Number.parseInt(code, 16);
+      return Number.isFinite(number) && number >= 0 && number <= 0x10ffff ? String.fromCodePoint(number) : "";
+    });
 }
 
 function titleFromInput(input) {
@@ -2070,11 +2352,10 @@ function extractJobContext(jobText, targetRole) {
 }
 
 function cleanJobLines(text) {
-  return asText(text)
-    .replace(/&nbsp;/gi, " ")
+  return cleanMultilineTextForAi(text)
     .split(/\r?\n+/)
     .flatMap((line) => line.split(/[•●]/g))
-    .map((line) => line.replace(/\bSJE\s*\d+(?:\.\d+)*\b/gi, " ").replace(/\s+/g, " ").trim())
+    .map((line) => line.replace(/\bSJE\s*\d+(?:\.\d+)*\b/gi, " ").replace(/^[*-]\s*/, "").replace(/\s+/g, " ").trim())
     .filter(Boolean)
     .filter((line) => !["profile insights", "job details", "full job description"].includes(line.toLowerCase()))
     .filter((line) => !/^job post(?:ing)?\b/i.test(line));
@@ -2170,8 +2451,7 @@ function cleanRoleLabel(value) {
 }
 
 function candidateEvidenceLines(text) {
-  return asText(text)
-    .replace(/&nbsp;/gi, " ")
+  return cleanMultilineTextForAi(text)
     .split(/\r?\n+|[•●]/)
     .map(cleanEvidenceLine)
     .filter(Boolean)

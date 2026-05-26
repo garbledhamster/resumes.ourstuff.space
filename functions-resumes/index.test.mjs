@@ -5,6 +5,16 @@ import functions from "./index.js";
 const api = functions._test;
 const originalFetch = globalThis.fetch;
 const originalAiBrainToken = process.env.AI_BRAIN_API_TOKEN;
+const originalOpenRouterKey = process.env.OPENROUTER_API_KEY;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  if (originalAiBrainToken === undefined) delete process.env.AI_BRAIN_API_TOKEN;
+  else process.env.AI_BRAIN_API_TOKEN = originalAiBrainToken;
+  if (originalOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+  else process.env.OPENROUTER_API_KEY = originalOpenRouterKey;
+  vi.restoreAllMocks();
+});
 
 function sampleInput() {
   return api.normalizeInput({
@@ -91,16 +101,69 @@ describe("ResumeDoc generator", () => {
     expect(text).not.toContain("jane@example.com linkedin.com");
     expect(response.page_1.experience_bullets[0].detail).toContain("Managed ticket queues");
   });
+
+  it("cleans noisy pasted fields before they reach packet prompts", () => {
+    const input = api.normalizeInput({
+      ...sampleInput(),
+      jobPost: [
+        "Profile insights",
+        "&lt;ul&gt;&lt;li&gt;Coordinate&nbsp;records\u2014daily&lt;/li&gt;&lt;li&gt;Requirements include Excel&amp; reporting&lt;/li&gt;&lt;/ul&gt;",
+      ].join("\n"),
+      workHistory: "Jane Applicant jane@example.com\n\u2022 Managed&nbsp;queues\u2014without missing follow-up\n\u2022 Improved reports",
+    });
+    const baseline = api.localResponseFromInput(input);
+    const context = api.packetPromptContext(input, "", baseline);
+
+    expect(input.jobPost).not.toContain("&lt;");
+    expect(input.jobPost).not.toContain("&nbsp;");
+    expect(input.jobPost).toContain("- Coordinate records - daily");
+    expect(context.source_chunks.map((chunk) => chunk.type)).toContain("work_history");
+    expect(context.source_chunks.filter((chunk) => chunk.type === "work_history").map((chunk) => chunk.text).join("\n")).not.toContain("jane@example.com");
+  });
+
+  it("sends targeted chunks and carries compact memory between OpenRouter section prompts", async () => {
+    process.env.OPENROUTER_API_KEY = "test-openrouter-key";
+    const prompts = [];
+    globalThis.fetch = vi.fn(async (_url, options) => {
+      const payload = JSON.parse(options.body);
+      const prompt = JSON.parse(payload.messages[1].content);
+      prompts.push(prompt);
+      return responseJson({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              [prompt.section]: prompt.current_safe_draft,
+              memory: {
+                summary: `${prompt.section} memory`,
+                facts_used: [`fact for ${prompt.section}`],
+                style_notes: [`style for ${prompt.section}`],
+              },
+            }),
+          },
+        }],
+      });
+    });
+
+    const input = api.normalizeInput({
+      ...sampleInput(),
+      workHistory: Array.from({ length: 30 }, (_, index) => `Work evidence line ${index + 1} with useful detail.`).join("\n"),
+      jobPost: [
+        "Operations Coordinator",
+        "Acme Company",
+        ...Array.from({ length: 25 }, (_, index) => `Requirement ${index + 1}: coordinate records, reports, and customer follow-up.`),
+      ].join("\n"),
+    });
+    const response = await api.buildPacketResponseWithOpenRouter(input, "");
+
+    expect(prompts).toHaveLength(6);
+    expect(prompts[0].input_context.source_chunks.map((chunk) => chunk.type)).toContain("work_history");
+    expect(prompts[3].input_context.source_chunks.some((chunk) => chunk.type === "work_history")).toBe(false);
+    expect(prompts[1].input_context.working_memory.section_summaries).toContain("page_1: page_1 memory");
+    expect(response.generation_memory.section_summaries).toContain("references: references memory");
+  });
 });
 
 describe("ResumeDoc notes and Jobel safety helpers", () => {
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    if (originalAiBrainToken === undefined) delete process.env.AI_BRAIN_API_TOKEN;
-    else process.env.AI_BRAIN_API_TOKEN = originalAiBrainToken;
-    vi.restoreAllMocks();
-  });
-
   it("uses stable note hashes and detects changed note bodies", () => {
     const note = api.normalizeResumeNote({
       id: "note-1",
