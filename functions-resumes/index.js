@@ -600,6 +600,7 @@ exports._test = {
   packetPromptContext,
   sectionContextForTask,
   shouldSkipBrainSync,
+  validatePacketResponse,
   validateResponse,
   extractDocxText,
 };
@@ -2432,14 +2433,71 @@ function validateResponse(data, input) {
 
 function validatePacketResponse(data, input) {
   const validated = validateResponse(data, input);
+  repairPacketQualitySections(validated, input);
   assertPacketContentQuality(validated, input);
   return validated;
 }
 
+function repairPacketQualitySections(data, input) {
+  const fallback = localResponseFromInput(input);
+  if (candidateClaimSectionHasJobNoise(data.page_1) || sectionHasRestrictedText(data.page_1, input)) {
+    data.page_1 = fallback.page_1;
+  }
+  if (candidateClaimSectionHasJobNoise(data.skill_tracker) || sectionHasRestrictedText(data.skill_tracker, input)) {
+    data.skill_tracker = fallback.skill_tracker;
+  }
+  if (candidateClaimSectionHasJobNoise({
+    about_me: data.interview_prep?.about_me,
+    stories: data.interview_prep?.stories,
+  }) || sectionHasRestrictedText(data.interview_prep, input)) {
+    data.interview_prep = fallback.interview_prep;
+  }
+  if (sectionHasRestrictedText(data.company_role_brief, input)) {
+    data.company_role_brief = fallback.company_role_brief;
+  }
+  const profileRestrictedText = [
+    stringsFromValue(data.profile_cards?.interviewer?.title),
+    stringsFromValue(data.profile_cards?.interviewer?.summary),
+    stringsFromValue(data.profile_cards?.interviewee?.title),
+    stringsFromValue(data.profile_cards?.interviewee?.summary),
+  ].flat().join("\n");
+  if (containsPrivateValue(profileRestrictedText, input, { includeName: true }) || hasPacketScaffoldText(profileRestrictedText)) {
+    data.profile_cards = fallback.profile_cards;
+  }
+  if (sectionHasRestrictedText(data.match_rationale, input)) {
+    data.match_rationale = fallback.match_rationale;
+  }
+}
+
+function candidateClaimSectionHasJobNoise(value) {
+  return splitCandidateSourceLines(stringsFromValue(value).join("\n")).some(isJobPostNoiseLine);
+}
+
+function sectionHasRestrictedText(value, input) {
+  const text = stringsFromValue(value).join("\n");
+  return containsPrivateValue(text, input, { includeName: true }) || hasPacketScaffoldText(text);
+}
+
 function assertPacketContentQuality(data, input) {
   const restrictedText = restrictedPacketText(data);
+  const candidateText = candidateClaimPacketText(data);
   const issues = [];
-  const badPatterns = [
+  if (hasPacketScaffoldText(restrictedText)) {
+    issues.push("scaffold_or_fallback_language");
+  }
+  if (containsPrivateValue(restrictedText, input, { includeName: true })) {
+    issues.push("identity_repeated_outside_identity_fields");
+  }
+  if (splitCandidateSourceLines(candidateText).some(isJobPostNoiseLine)) {
+    issues.push("job_post_header_used_as_content");
+  }
+  if (issues.length) {
+    throw httpError(422, `Generated packet failed quality checks: ${[...new Set(issues)].join(", ")}`, "packet_quality_failed");
+  }
+}
+
+function hasPacketScaffoldText(text) {
+  return [
     /\bRole-Focused Resume Packet\b/i,
     /\bCandidate-provided work history\b/i,
     /\busing the candidate-provided resume details\b/i,
@@ -2447,19 +2505,16 @@ function assertPacketContentQuality(data, input) {
     /\bRole-specific packet generated\b/i,
     /\bsubmitted resume history\b/i,
     /\bTarget Company\b/i,
-  ];
-  if (badPatterns.some((pattern) => pattern.test(restrictedText))) {
-    issues.push("scaffold_or_fallback_language");
-  }
-  if (containsPrivateValue(restrictedText, input, { includeName: true })) {
-    issues.push("identity_repeated_outside_identity_fields");
-  }
-  if (splitCandidateSourceLines(restrictedText).some(isJobPostNoiseLine)) {
-    issues.push("job_post_header_used_as_content");
-  }
-  if (issues.length) {
-    throw httpError(422, `Generated packet failed quality checks: ${[...new Set(issues)].join(", ")}`, "packet_quality_failed");
-  }
+  ].some((pattern) => pattern.test(asText(text)));
+}
+
+function candidateClaimPacketText(data) {
+  return [
+    stringsFromValue(data.page_1),
+    stringsFromValue(data.skill_tracker),
+    stringsFromValue(data.interview_prep?.about_me),
+    stringsFromValue(data.interview_prep?.stories),
+  ].flat().join("\n");
 }
 
 function restrictedPacketText(data) {
@@ -2487,15 +2542,24 @@ function stringsFromValue(value) {
 function containsPrivateValue(text, input, options = {}) {
   const value = asText(text);
   if (!value) return false;
+  const location = privateLocationValue(input.location);
   const exactValues = [
     input.email,
-    input.location,
+    location,
     options.includeName ? input.fullName : "",
   ].map(asText).filter((item) => item.length >= 4);
   if (exactValues.some((item) => new RegExp(`\\b${escapeRegExp(item)}\\b`, "i").test(value))) return true;
   const inputPhone = digitsOnly(input.phone);
   if (inputPhone.length >= 7 && digitsOnly(value).includes(inputPhone)) return true;
   return false;
+}
+
+function privateLocationValue(location) {
+  const value = asText(location);
+  if (!value) return "";
+  if (/[,0-9]/.test(value)) return value;
+  if (value.split(/\s+/).filter(Boolean).length >= 2) return value;
+  return "";
 }
 
 async function buildDocx(response, input) {

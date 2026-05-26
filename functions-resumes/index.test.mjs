@@ -229,6 +229,56 @@ describe("ResumeDoc generator", () => {
     expect(response.page_1.skill_items.map((item) => item.value).join("\n")).not.toMatch(/SENIOR IT SYSTEMS ENGINEER/i);
   });
 
+  it("allows job context in the company brief without failing the final packet guard", () => {
+    const input = sampleInput();
+    const response = api.localResponseFromInput(input);
+    response.company_role_brief.about_company[0] = "The posting describes a part-time role for evening and weekend customer support.";
+
+    expect(() => api.validatePacketResponse(response, input)).not.toThrow();
+  });
+
+  it("repairs copied job headers in candidate claim sections before final validation", () => {
+    const input = sampleInput();
+    const response = api.localResponseFromInput(input);
+    response.page_1.skill_items[0].value = "Hybrid | Full-Time | Monday - Friday, 8:00 AM - 5:00 PM";
+
+    const repaired = api.validatePacketResponse(response, input);
+
+    expect(repaired.page_1.skill_items[0].value).not.toMatch(/Hybrid|Monday|8:00 AM/i);
+    expect(repaired.page_1.skill_items[0].value).toBe(api.localResponseFromInput(input).page_1.skill_items[0].value);
+  });
+
+  it("does not treat a broad one-word location as a private identity leak", () => {
+    const input = api.normalizeInput({
+      ...sampleInput(),
+      location: "Minnesota",
+    });
+    const response = api.localResponseFromInput(input);
+    response.company_role_brief.about_company[0] = "The posting describes a Minnesota role with customer communication responsibilities.";
+
+    expect(() => api.validatePacketResponse(response, input)).not.toThrow();
+  });
+
+  it("repairs specific identity details outside identity fields before final validation", () => {
+    const input = sampleInput();
+    const response = api.localResponseFromInput(input);
+    response.interview_prep.about_me[0] = "Jane Applicant can discuss scheduling and reporting.";
+
+    const repaired = api.validatePacketResponse(response, input);
+
+    expect(repaired.interview_prep.about_me.join("\n")).not.toContain("Jane Applicant");
+  });
+
+  it("repairs scaffold language before final validation", () => {
+    const input = sampleInput();
+    const response = api.localResponseFromInput(input);
+    response.company_role_brief.about_company[0] = "Target Company is hiring from candidate-provided work history.";
+
+    const repaired = api.validatePacketResponse(response, input);
+
+    expect(JSON.stringify(repaired)).not.toMatch(/Target Company|candidate-provided work history/i);
+  });
+
   it("appends a minute timestamp to generated output titles", () => {
     expect(api.outputTitleWithTimestamp("SJE Systems Administrator", "2026-05-26T17:04:30.000Z")).toBe("SJE Systems Administrator - 2026-05-26 1204 CT");
     expect(api.outputTitleWithTimestamp("SJE Systems Administrator - 2026-05-26 1204 CT", "2026-05-26T17:05:01.000Z")).toBe("SJE Systems Administrator - 2026-05-26 1205 CT");
