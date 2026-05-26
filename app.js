@@ -32,6 +32,8 @@ const state = {
   packages: [],
   packagesLoaded: false,
   packageRefreshTimer: null,
+  packageActivityTimer: null,
+  localActivity: [],
   access: null,
   apiBaseOverride: "",
   notes: [],
@@ -168,12 +170,50 @@ function setPill(el, text, tone = "neutral") {
 }
 
 function log(message) {
-  const stamp = new Date().toLocaleTimeString([], {
+  state.localActivity = [
+    {
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      at: new Date().toISOString(),
+      tone: "info",
+      message,
+    },
+    ...state.localActivity,
+  ].slice(0, 30);
+  renderActivityLog();
+}
+
+function renderActivityLog() {
+  if (!els.activityLog) return;
+  const packageEvents = Array.isArray(state.activePackage?.activity) ? state.activePackage.activity : [];
+  const events = [...packageEvents, ...state.localActivity]
+    .filter((entry) => entry?.at && entry?.message)
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)))
+    .slice(0, 80);
+  if (!events.length) {
+    els.activityLog.textContent = "Ready.";
+    return;
+  }
+  els.activityLog.textContent = events.map(activityLine).join("\n");
+}
+
+function activityLine(entry) {
+  const stamp = formatActivityTime(entry.at);
+  const label = entry.stage ? `${titleCase(entry.stage.replace(/[_-]+/g, " "))}: ` : "";
+  return `${stamp}  ${label}${entry.message}`;
+}
+
+function formatActivityTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--:--:--";
+  return date.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
   });
-  els.activityLog.textContent = `${stamp}  ${message}\n${els.activityLog.textContent}`;
+}
+
+function titleCase(value) {
+  return String(value || "").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function activePackageKey() {
@@ -186,6 +226,7 @@ function setActivePackage(pkg) {
     localStorage.setItem(activePackageKey(), pkg.id);
   }
   upsertPackage(pkg);
+  renderActivityLog();
   render();
 }
 
@@ -374,6 +415,7 @@ function render() {
   renderPackageManager();
   renderNotesDrawer();
   renderAdmin();
+  renderActivityLog();
 
   document.querySelectorAll(".steps article").forEach((step) => {
     step.classList.remove("active", "done");
@@ -548,11 +590,13 @@ async function initializeFirebase() {
       if (state.access?.admin) await loadAdminData();
     } else {
       stopPackageLiveRefresh();
+      stopPackageActivityPolling();
       stopNotesListener();
       state.notes = [];
       state.notesLoaded = false;
       state.packages = [];
       state.packagesLoaded = false;
+      state.localActivity = [];
       state.activeNoteId = null;
       state.sourceRefs = { jobPostNoteId: "", workHistoryProfileId: WORK_HISTORY_PROFILE_ID };
       state.jobelMessages = [];
@@ -722,6 +766,27 @@ async function refreshPackagesLive() {
   }
 }
 
+async function refreshPackageActivity() {
+  const packageId = state.activePackage?.id;
+  if (!state.user || !packageId) return;
+  try {
+    const result = await api(`/packages/${encodeURIComponent(packageId)}/activity`);
+    if (result.package) {
+      state.activePackage = { ...state.activePackage, ...result.package };
+      upsertPackage(state.activePackage);
+    } else if (Array.isArray(result.activity)) {
+      state.activePackage = {
+        ...state.activePackage,
+        activity: result.activity,
+      };
+    }
+    renderActivityLog();
+    render();
+  } catch {
+    // Activity polling is supportive; explicit actions still surface errors.
+  }
+}
+
 function syncActivePackageFromList() {
   if (!state.activePackage?.id) return;
   const fresh = state.packages.find((item) => item.id === state.activePackage.id);
@@ -739,6 +804,19 @@ function stopPackageLiveRefresh() {
   if (state.packageRefreshTimer) {
     window.clearInterval(state.packageRefreshTimer);
     state.packageRefreshTimer = null;
+  }
+}
+
+function startPackageActivityPolling() {
+  stopPackageActivityPolling();
+  refreshPackageActivity();
+  state.packageActivityTimer = window.setInterval(refreshPackageActivity, 2500);
+}
+
+function stopPackageActivityPolling() {
+  if (state.packageActivityTimer) {
+    window.clearInterval(state.packageActivityTimer);
+    state.packageActivityTimer = null;
   }
 }
 
@@ -852,6 +930,8 @@ async function generateDocx() {
   if (!saved) return;
   const extraDirection = els.notes.value.trim();
   setBusy(true);
+  log("Jobel is starting the DOCX pass. You can keep this page open while progress syncs.");
+  startPackageActivityPolling();
   try {
     const result = await api(`/packages/${encodeURIComponent(saved.id)}/generate`, {
       method: "POST",
@@ -859,10 +939,13 @@ async function generateDocx() {
     });
     setActivePackage(result.package);
     await loadPackages();
+    await refreshPackageActivity();
     log("DOCX generated.");
   } catch (error) {
+    await refreshPackageActivity();
     log(error.message);
   } finally {
+    stopPackageActivityPolling();
     setBusy(false);
   }
 }
@@ -872,6 +955,8 @@ async function submitRevision() {
   const instruction = els.revisionText.value.trim();
   if (!pkg || !instruction) return;
   setBusy(true);
+  log("Jobel is starting the revision pass and keeping it tied to this package history.");
+  startPackageActivityPolling();
   try {
     const result = await api(`/packages/${encodeURIComponent(pkg.id)}/revisions`, {
       method: "POST",
@@ -880,10 +965,13 @@ async function submitRevision() {
     els.revisionText.value = "";
     setActivePackage(result.package);
     await loadPackages();
+    await refreshPackageActivity();
     log("Revision generated.");
   } catch (error) {
+    await refreshPackageActivity();
     log(error.message);
   } finally {
+    stopPackageActivityPolling();
     setBusy(false);
   }
 }

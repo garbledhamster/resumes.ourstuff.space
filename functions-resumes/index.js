@@ -39,6 +39,7 @@ const RESPONSIBILITY_COUNT = 7;
 const REQUIREMENT_COUNT = 7;
 const WHY_JOIN_COUNT = 4;
 const REFERENCE_COUNT = 3;
+const ACTIVITY_LIMIT = 80;
 const MAX_TEXT = 70000;
 const MAX_FILE_BYTES = 7 * 1024 * 1024;
 const MAX_AI_CHUNK_CHARS = 2200;
@@ -175,6 +176,9 @@ app.post("/api/packages", requireActor, asyncHandler(async (req, res) => {
     trackerStoragePath: null,
     createdAt: now,
     updatedAt: now,
+    activity: [
+      packageActivityEvent("workspace", "Jobel opened a fresh resume workspace for this package.", "good", now),
+    ],
   });
   await packageRef(id).set(pkg);
   if (input.jobPostNoteId) {
@@ -203,6 +207,11 @@ app.get("/api/packages/:id", requireActor, asyncHandler(async (req, res) => {
   res.json({ ok: true, package: publicPackage(synced), input });
 }));
 
+app.get("/api/packages/:id/activity", requireActor, asyncHandler(async (req, res) => {
+  const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
+  res.json({ ok: true, package: publicPackage(pkg), activity: publicActivity(pkg.activity) });
+}));
+
 app.patch("/api/packages/:id", requireActor, asyncHandler(async (req, res) => {
   const actor = req.actor;
   const pkg = await getOwnedPackage(req.params.id, actor.uid);
@@ -215,6 +224,7 @@ app.patch("/api/packages/:id", requireActor, asyncHandler(async (req, res) => {
     updatedAt: nowIso(),
   });
   await packageRef(pkg.id).set(patch, { merge: true });
+  await appendPackageActivity(pkg.id, "sources_saved", "Jobel saved the latest source references and has them ready for the next DOCX pass.", "good");
   if (input.jobPostNoteId) {
     await resumeNoteRef(actor.uid, input.jobPostNoteId).set({ packageId: pkg.id, updatedAt: patch.updatedAt }, { merge: true });
   }
@@ -234,6 +244,9 @@ app.post("/api/sources/prepare", requireActor, asyncHandler(async (req, res) => 
     jobPost: input.jobPost,
     workHistory: input.workHistory,
   });
+  if (packageId) {
+    await appendPackageActivity(packageId, "sources_organized", "Jobel organized the job posting and work-history source notes so the generator can use stable references.", "good");
+  }
   res.json({ ok: true, ...prepared });
 }));
 
@@ -316,15 +329,22 @@ app.post("/api/packages/:id/generate", requireActor, asyncHandler(async (req, re
   const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
   const unlockedPkg = await requireUnlockedPackage(req, pkg);
   const extraDirection = cleanBoundedString(req.body?.extraDirection, 6000);
-  const input = await loadPackageInputForUse(req.actor.uid, pkg, { extraDirection });
-  const result = await generateAndStore({
-    actor: req.actor,
-    pkg: unlockedPkg,
-    input,
-    revisionInstruction: cleanBoundedString(req.body?.instruction, 2000),
-    countRevision: false,
-  });
-  res.json(result);
+  try {
+    await markGenerationStarted(pkg.id, "Jobel is gathering your saved resume details, job post, and package notes.");
+    const input = await loadPackageInputForUse(req.actor.uid, pkg, { extraDirection });
+    await appendPackageActivity(pkg.id, "sources_loaded", "Jobel loaded the stable source references and is separating contact fields from resume evidence.", "info");
+    const result = await generateAndStore({
+      actor: req.actor,
+      pkg: unlockedPkg,
+      input,
+      revisionInstruction: cleanBoundedString(req.body?.instruction, 2000),
+      countRevision: false,
+    });
+    res.json(result);
+  } catch (error) {
+    await markGenerationFailed(pkg.id, error);
+    throw error;
+  }
 }));
 
 app.post("/api/packages/:id/revisions", requireActor, asyncHandler(async (req, res) => {
@@ -341,15 +361,22 @@ app.post("/api/packages/:id/revisions", requireActor, asyncHandler(async (req, r
   if (!instruction) {
     throw httpError(400, "Revision instruction is required.", "missing_instruction");
   }
-  const input = await loadPackageInputForUse(req.actor.uid, pkg);
-  const result = await generateAndStore({
-    actor: req.actor,
-    pkg: unlockedPkg,
-    input,
-    revisionInstruction: instruction,
-    countRevision: true,
-  });
-  res.json(result);
+  try {
+    await markGenerationStarted(pkg.id, "Jobel is opening the latest DOCX context and applying your revision request.");
+    const input = await loadPackageInputForUse(req.actor.uid, pkg);
+    await appendPackageActivity(pkg.id, "revision_loaded", "Jobel loaded the prior package inputs and is keeping the revision tied to the same source evidence.", "info");
+    const result = await generateAndStore({
+      actor: req.actor,
+      pkg: unlockedPkg,
+      input,
+      revisionInstruction: instruction,
+      countRevision: true,
+    });
+    res.json(result);
+  } catch (error) {
+    await markGenerationFailed(pkg.id, error);
+    throw error;
+  }
 }));
 
 app.get("/api/admin/summary", requireActor, asyncHandler(async (req, res) => {
@@ -666,6 +693,85 @@ function templateAssetInfo() {
 
 function packageRef(id) {
   return db().collection("resume_packages").doc(id);
+}
+
+function packageActivityEvent(stage, message, tone = "info", at = nowIso()) {
+  return withoutUndefined({
+    id: crypto.randomUUID(),
+    at,
+    stage: cleanBoundedString(stage, 80) || "activity",
+    tone: ["info", "good", "warn", "bad"].includes(tone) ? tone : "info",
+    message: cleanBoundedString(message, 420),
+  });
+}
+
+function publicActivity(activity) {
+  return Array.isArray(activity)
+    ? activity
+        .filter((entry) => entry && entry.at && entry.message)
+        .map((entry) => ({
+          id: cleanBoundedString(entry.id, 80) || sha256Json({ at: entry.at, message: entry.message }).slice(0, 16),
+          at: cleanBoundedString(entry.at, 80),
+          stage: cleanBoundedString(entry.stage, 80),
+          tone: ["info", "good", "warn", "bad"].includes(entry.tone) ? entry.tone : "info",
+          message: cleanBoundedString(entry.message, 420),
+        }))
+        .sort((a, b) => String(a.at).localeCompare(String(b.at)))
+        .slice(-ACTIVITY_LIMIT)
+    : [];
+}
+
+async function appendPackageActivity(packageId, stage, message, tone = "info") {
+  if (!packageId) return null;
+  const event = packageActivityEvent(stage, message, tone);
+  await db().runTransaction(async (transaction) => {
+    const ref = packageRef(packageId);
+    const snap = await transaction.get(ref);
+    if (!snap.exists) return;
+    const current = publicActivity(snap.data().activity);
+    transaction.set(ref, {
+      activity: [...current, event].slice(-ACTIVITY_LIMIT),
+      updatedAt: event.at,
+    }, { merge: true });
+  });
+  return event;
+}
+
+async function markGenerationStarted(packageId, message) {
+  const event = packageActivityEvent("generation_started", message, "info");
+  await db().runTransaction(async (transaction) => {
+    const ref = packageRef(packageId);
+    const snap = await transaction.get(ref);
+    if (!snap.exists) return;
+    const current = publicActivity(snap.data().activity);
+    transaction.set(ref, {
+      status: "generating",
+      lastError: null,
+      activity: [...current, event].slice(-ACTIVITY_LIMIT),
+      updatedAt: event.at,
+    }, { merge: true });
+  });
+}
+
+async function markGenerationFailed(packageId, error) {
+  const statusCode = error.statusCode || 500;
+  const code = error.code || "generation_failed";
+  const detail = statusCode < 500
+    ? cleanBoundedString(error.message, 260)
+    : "Jobel hit a server-side generation problem before the DOCX could be saved.";
+  const event = packageActivityEvent("generation_failed", detail, "bad");
+  await db().runTransaction(async (transaction) => {
+    const ref = packageRef(packageId);
+    const snap = await transaction.get(ref);
+    if (!snap.exists) return;
+    const current = publicActivity(snap.data().activity);
+    transaction.set(ref, {
+      status: "error",
+      lastError: code,
+      activity: [...current, event].slice(-ACTIVITY_LIMIT),
+      updatedAt: event.at,
+    }, { merge: true });
+  });
 }
 
 function resumeNoteRef(uid, noteId) {
@@ -1159,11 +1265,15 @@ function outputPath(uid, packageId, generationId, ext) {
 
 async function generateAndStore({ actor, pkg, input, revisionInstruction, countRevision }) {
   const generationId = crypto.randomUUID();
+  await appendPackageActivity(pkg.id, "ai_drafting", "Jobel is asking the flagship model to draft the resume sections one at a time with low-thinking mode.", "info");
   const response = await buildPacketResponse(input, revisionInstruction);
+  await appendPackageActivity(pkg.id, "quality_review", "Jobel finished the quality review for copied job-post headers, repeated contact details, and generic scaffold text.", "good");
   const now = nowIso();
   const generatedTitle = outputTitleWithTimestamp(response.output_file_label || pkg.title || titleFromInput(input), now);
   response.output_file_label = generatedTitle;
+  await appendPackageActivity(pkg.id, "docx_rendering", "Jobel is placing the approved text into the Word template and keeping the DOCX stable on the server.", "info");
   const { docx, trackerPng } = await buildDocx(response, input);
+  await appendPackageActivity(pkg.id, "storage", "Jobel is saving the DOCX, JSON audit copy, and tracker image to your private package folder.", "info");
   const docxPath = outputPath(actor.uid, pkg.id, generationId, "docx");
   const jsonPath = outputPath(actor.uid, pkg.id, generationId, "json");
   const trackerPath = outputPath(actor.uid, pkg.id, generationId, "png");
@@ -1204,6 +1314,7 @@ async function generateAndStore({ actor, pkg, input, revisionInstruction, countR
     promptVersion: PROMPT_VERSION,
     createdAt: now,
   }));
+  await appendPackageActivity(pkg.id, "complete", `Jobel finished the DOCX: ${generatedTitle}.`, "good");
   return { ok: true, package: publicPackage({ ...pkg, ...patch }), generationId };
 }
 
@@ -2883,6 +2994,7 @@ function publicPackage(pkg) {
     createdAt: pkg.createdAt,
     updatedAt: pkg.updatedAt,
     generatedAt: pkg.generatedAt,
+    activity: publicActivity(pkg.activity),
   });
 }
 
