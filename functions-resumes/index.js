@@ -17,7 +17,7 @@ const AI_BRAIN_API_TOKEN_SECRET = defineSecret("AI_BRAIN_API_TOKEN");
 
 const TEMPLATE_PATH = path.join(__dirname, "assets", "interview-packet-template.docx");
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const PROMPT_VERSION = "2026-05-26-resumedoc-source-fidelity";
+const PROMPT_VERSION = "2026-05-26-resumedoc-source-fidelity-v2";
 const RESUMEDOC_APP_ID = "resumedoc";
 const JOBEL_NOTE_MARKER = "ai:jobel-note";
 const JOB_POSTING_NOTE_MARKER = "resumedoc:job-posting";
@@ -59,6 +59,7 @@ const LEFTOVER_TERMS = [
   "Kunes",
 ];
 const SOURCE_PLACEHOLDER = "Confirm a source-backed example before submitting.";
+const SOURCE_EVIDENCE_NEEDED = "Add source evidence before claiming this skill.";
 const GENERATED_PACKET_PATTERNS = [
   /\brole-focused resume packet\b/i,
   /\bis targeting\b.{0,80}\bwith experience and strengths drawn from\b/i,
@@ -565,6 +566,7 @@ exports._test = {
   normalizeResumeNote,
   normalizeWorkHistoryProfile,
   noteSourceHash,
+  outputTitleWithTimestamp,
   packetPromptContext,
   sectionContextForTask,
   shouldSkipBrainSync,
@@ -1157,6 +1159,9 @@ function outputPath(uid, packageId, generationId, ext) {
 async function generateAndStore({ actor, pkg, input, revisionInstruction, countRevision }) {
   const generationId = crypto.randomUUID();
   const response = await buildPacketResponse(input, revisionInstruction);
+  const now = nowIso();
+  const generatedTitle = outputTitleWithTimestamp(response.output_file_label || pkg.title || titleFromInput(input), now);
+  response.output_file_label = generatedTitle;
   const { docx, trackerPng } = await buildDocx(response, input);
   const docxPath = outputPath(actor.uid, pkg.id, generationId, "docx");
   const jsonPath = outputPath(actor.uid, pkg.id, generationId, "json");
@@ -1173,8 +1178,8 @@ async function generateAndStore({ actor, pkg, input, revisionInstruction, countR
     resumable: false,
     metadata: { contentType: "image/png", cacheControl: "private, no-store" },
   });
-  const now = nowIso();
   const patch = withoutUndefined({
+    title: generatedTitle,
     status: "generated",
     latestGenerationId: generationId,
     outputStoragePath: docxPath,
@@ -1205,15 +1210,13 @@ async function buildPacketResponse(input, revisionInstruction) {
   if (process.env.OPENROUTER_API_KEY) {
     try {
       const response = await buildPacketResponseWithOpenRouter(input, revisionInstruction);
-      return validateResponse(response, input);
+      return validatePacketResponse(response, input);
     } catch (error) {
       console.warn("openrouter_generation_failed", error.message);
-      if (process.env.RESUME_REQUIRE_OPENROUTER === "true") {
-        throw error;
-      }
+      throw httpError(502, "ResumeDoc could not get a usable AI packet. No fallback DOCX was generated.", "ai_generation_failed");
     }
   }
-  return validateResponse(localResponseFromInput(input, revisionInstruction), input);
+  return validatePacketResponse(localResponseFromInput(input, revisionInstruction), input);
 }
 
 async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
@@ -1232,6 +1235,7 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
         "Faithfully reformulate the first resume page only.",
         "Use actual candidate evidence from workHistory. Do not use contact/header lines as accomplishments.",
         "Every candidate claim must trace to selected work_history chunks or candidate identity fields.",
+        "Use candidate identity only where the schema explicitly needs identity. Do not put names, phone numbers, emails, or locations in summary, skill values, or experience bullets.",
         "Do not use copied job-post headers, generated packet boilerplate, or placeholders as candidate evidence.",
         "Return concise text that will fit existing Word template paragraphs.",
         "Do not return colors, style, layout, page-break, markdown, or DOCX instructions.",
@@ -1269,6 +1273,7 @@ async function buildPacketResponseWithOpenRouter(input, revisionInstruction) {
         "Faithfully reformulate one interview-prep page only.",
         "Stories must be prompts grounded in supplied work history, not new claims.",
         "If the source has no real story evidence, write a confirmation prompt instead of filler.",
+        "Do not repeat header/contact details in About Me or Stories.",
         "Keep every line short enough for a one-page interview sheet.",
       ],
       sourceTypes: ["candidate_profile", "work_history", "job_responsibilities", "notes"],
@@ -1620,6 +1625,8 @@ function packetPromptContext(input, revisionInstruction, baseline) {
       "Use only candidate facts found in the selected source chunks.",
       "Candidate resume text may contain prior ResumeDoc output. Treat generated boilerplate, contact headers, placeholders, and copied job-post lines as unusable source evidence.",
       "Faithfully reformulate real candidate evidence toward the target job; do not turn job-post text into candidate history.",
+      "Identity fields are variables for header/profile placement only. Do not put the candidate's name, phone, email, location, or contact header text into skills, experience bullets, stories, or company/role analysis.",
+      "If a skill or story lacks candidate evidence, say that evidence is needed instead of filling with the candidate's name, phone number, job-post header, or generic resume boilerplate.",
       "Do not invent degrees, certifications, exact dates, software systems, employers, metrics, references, or interviewer biography.",
       "Use placeholders for unknown private details.",
       "Keep text compact so it fits the fixed template slots.",
@@ -1664,7 +1671,7 @@ function buildAiSourceChunks(input, job, workEvidence) {
       `Phone: ${input.phone || "[Phone]"}`,
     ].join("\n")),
     aiChunk("job.overview", "job_overview", "Job overview and likely company", [
-      `Inferred company: ${job.company || "Target Company"}`,
+      `Inferred company: ${job.company || "Target Employer"}`,
       `Inferred role: ${job.role || input.targetRole || "Target Role"}`,
       ...job.lines.slice(0, 8),
     ].join("\n")),
@@ -1982,21 +1989,22 @@ function localResponseFromInput(input, revisionInstruction) {
   const candidateSource = normalizeCandidateSource(input.workHistory, input);
   const workEvidence = candidateSource.workEvidence;
   const role = cleanRoleLabel(input.targetRole || job.role || "Target Role");
-  const company = job.company || "Target Company";
+  const company = job.company || "Target Employer";
   const skills = inferSkills(input, job, candidateSource);
   const refs = defaultReferences();
   const revisionNote = revisionInstruction ? ` Revision focus: ${revisionInstruction}` : "";
+  const topEvidence = workEvidence.slice(0, 4);
   return {
     company,
     role,
     output_file_label: `${company} ${role}`,
     page_1: {
       role_title: role.toUpperCase(),
-      role_subtitle: "Source-Faithful Resume Packet",
+      role_subtitle: "Source-Checked Draft",
       skills_section_title: "TARGET ROLE SKILLS",
       experience_section_title: "RELEVANT EXPERIENCE",
       summary: clipText(
-        `${input.fullName || "The candidate"} is targeting a ${role} role. This packet reformulates only source-backed resume facts toward ${company}'s posting, emphasizing ${skills.slice(0, 4).join(", ")} while leaving unsupported details as items to confirm.${revisionNote}`,
+        `This ${role} draft connects verified source evidence to ${company}'s posting, emphasizing ${skills.slice(0, 4).join(", ")} while leaving unsupported details as items to confirm.${revisionNote}`,
         620,
       ),
       skill_items: skills.slice(0, SKILL_ITEM_COUNT).map((skill) => ({
@@ -2007,7 +2015,7 @@ function localResponseFromInput(input, revisionInstruction) {
     },
     skill_tracker: {
       headline: `${role} Match Tracker`,
-      match_summary: `${input.fullName || "The candidate"} can target ${company}'s ${role} needs by connecting verified resume evidence to the posting and confirming any missing specifics before submitting.`,
+      match_summary: `The strongest ${company} ${role} angle should come from verified work evidence, not repeated contact details or copied job-post wording.`,
       strongest_skills: skills.slice(0, 5),
       transferable_evidence: buildTransferableEvidence(workEvidence),
       growth_areas: [
@@ -2026,12 +2034,12 @@ function localResponseFromInput(input, revisionInstruction) {
       title: "Interview Reference Sheet",
       about_heading: "About Me:",
       about_me: [
-        `${input.fullName || "Candidate"} is targeting ${role} opportunities.`,
-        `Location/contact: ${input.location || "[location]"} | ${input.email || "[email]"} | ${input.phone || "[phone]"}.`,
+        `Target direction: ${role}.`,
         `Strongest fit themes: ${skills.slice(0, 4).join(", ")}.`,
-        workEvidence[0] ? `Lead with verified source evidence: ${clipText(workEvidence[0], 95)}` : "Add verified work-history examples before submitting.",
+        topEvidence[0] ? `Lead with: ${clipText(topEvidence[0], 95)}` : "Add verified work-history examples before submitting.",
+        topEvidence[1] ? `Second proof point: ${clipText(topEvidence[1], 90)}` : "Confirm one concrete responsibility before submitting.",
         "Focus on honest, specific examples rather than invented metrics or dates.",
-        "Bring the final DOCX packet and confirm any placeholders before applying.",
+        "Use the header fields for contact details; keep the resume body focused on evidence.",
       ],
       why_heading: `Why ${company}:`,
       why_company: `${company}'s ${role} posting lines up with the candidate's provided experience and target direction. The strongest pitch is practical fit: relevant skills, clear examples, and a thoughtful understanding of the role's responsibilities.`,
@@ -2100,12 +2108,12 @@ function localResponseFromInput(input, revisionInstruction) {
         section_title: "Interviewee",
         name: input.fullName || "[Full Name]",
         title: `${role} Candidate`,
-        summary: `${input.fullName || "The candidate"} is applying for ${company}'s ${role} role with a packet tailored from the supplied resume history, job posting, and direction.`,
+        summary: `Prepared to discuss source-backed ${role} examples for ${company}, with unknown details left for confirmation instead of invention.`,
       },
     },
     references: { heading: "References", items: refs },
     match_rationale: [
-      "Local fallback packet generated directly from the submitted resume details and job posting.",
+      "Local draft generated from parsed source evidence and the submitted job posting.",
       "No unavailable degrees, dates, employers, metrics, or certifications were invented.",
     ],
     research_sources: [],
@@ -2154,6 +2162,74 @@ function validateResponse(data, input) {
   }
   data.profile_cards.interviewee.name = data.profile_cards.interviewee.name || input.fullName || "[Full Name]";
   return data;
+}
+
+function validatePacketResponse(data, input) {
+  const validated = validateResponse(data, input);
+  assertPacketContentQuality(validated, input);
+  return validated;
+}
+
+function assertPacketContentQuality(data, input) {
+  const restrictedText = restrictedPacketText(data);
+  const issues = [];
+  const badPatterns = [
+    /\bRole-Focused Resume Packet\b/i,
+    /\bCandidate-provided work history\b/i,
+    /\busing the candidate-provided resume details\b/i,
+    /\bTargeted Resume Brief\b/i,
+    /\bRole-specific packet generated\b/i,
+    /\bsubmitted resume history\b/i,
+    /\bTarget Company\b/i,
+  ];
+  if (badPatterns.some((pattern) => pattern.test(restrictedText))) {
+    issues.push("scaffold_or_fallback_language");
+  }
+  if (containsPrivateValue(restrictedText, input, { includeName: true })) {
+    issues.push("identity_repeated_outside_identity_fields");
+  }
+  if (splitCandidateSourceLines(restrictedText).some(isJobPostNoiseLine)) {
+    issues.push("job_post_header_used_as_content");
+  }
+  if (issues.length) {
+    throw new Error(`Generated packet failed quality checks: ${[...new Set(issues)].join(", ")}`);
+  }
+}
+
+function restrictedPacketText(data) {
+  return [
+    stringsFromValue(data.page_1),
+    stringsFromValue(data.skill_tracker),
+    stringsFromValue(data.interview_prep),
+    stringsFromValue(data.company_role_brief),
+    stringsFromValue(data.profile_cards?.interviewer?.title),
+    stringsFromValue(data.profile_cards?.interviewer?.summary),
+    stringsFromValue(data.profile_cards?.interviewee?.title),
+    stringsFromValue(data.profile_cards?.interviewee?.summary),
+    stringsFromValue(data.match_rationale),
+  ].flat().join("\n");
+}
+
+function stringsFromValue(value) {
+  if (value === null || value === undefined) return [];
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return [String(value)];
+  if (Array.isArray(value)) return value.flatMap(stringsFromValue);
+  if (typeof value === "object") return Object.values(value).flatMap(stringsFromValue);
+  return [];
+}
+
+function containsPrivateValue(text, input, options = {}) {
+  const value = asText(text);
+  if (!value) return false;
+  const exactValues = [
+    input.email,
+    input.location,
+    options.includeName ? input.fullName : "",
+  ].map(asText).filter((item) => item.length >= 4);
+  if (exactValues.some((item) => new RegExp(`\\b${escapeRegExp(item)}\\b`, "i").test(value))) return true;
+  const inputPhone = digitsOnly(input.phone);
+  if (inputPhone.length >= 7 && digitsOnly(value).includes(inputPhone)) return true;
+  return false;
 }
 
 async function buildDocx(response, input) {
@@ -2219,14 +2295,14 @@ function applyPageOne(table, topParagraphs, response, input) {
 
   setParagraphText(experienceParas[1], clipText(page.experience_section_title || "RELEVANT EXPERIENCE", 60).toUpperCase());
   setParagraphText(experienceParas[3], input.targetRole || "Target Role");
-  setParagraphText(experienceParas[4], asText(response.company, "Target Company"));
-  setParagraphText(experienceParas[5], "Candidate-provided work history");
+  setParagraphText(experienceParas[4], asText(response.company, "Target Employer"));
+  setParagraphText(experienceParas[5], "Source-backed highlights");
   page.experience_bullets.forEach((bullet, offset) => {
     setParagraphText(experienceParas[7 + offset], `${clipText(bullet.lead, 95)} ${clipText(bullet.detail, 160)}`);
   });
   setParagraphText(experienceParas[15], "ADDITIONAL CONTEXT");
-  setParagraphText(experienceParas[17], "Targeted Resume Brief");
-  setParagraphText(experienceParas[18], clipText(input.notes || "Role-specific packet generated from the submitted resume history and job posting.", 180));
+  setParagraphText(experienceParas[17], "Application Focus");
+  setParagraphText(experienceParas[18], clipText(response.match_rationale?.[0] || input.notes || "Tie each claim to verified source evidence before submitting.", 180));
 
   const documentFields = [
     input.fullName || "[Full Name]",
@@ -2444,7 +2520,7 @@ function replaceAccent(xml, oldHex, newHex) {
 function scrubSourceTemplateTermsXml(xml, response, input) {
   const candidate = input.fullName || response.profile_cards?.interviewee?.name || "Candidate";
   const role = response.role || input.targetRole || "Target Role";
-  const company = response.company || "Target Company";
+  const company = response.company || "Target Employer";
   const allowed = allowedLeftoverText(response, input);
   const replacements = new Map([
     ["Joseph (Joe) Rice", candidate],
@@ -2760,6 +2836,31 @@ function titleFromInput(input) {
   return clipText(`${name}${role}`, 120);
 }
 
+function outputTitleWithTimestamp(title, isoDate = nowIso()) {
+  const base = stripOutputTimestamp(asText(title, "ResumeDoc packet"));
+  return clipText(`${base} - ${formatOutputTimestamp(isoDate)}`, 120);
+}
+
+function stripOutputTimestamp(title) {
+  return asText(title, "ResumeDoc packet").replace(/\s+-\s+\d{4}-\d{2}-\d{2}\s+\d{4}\s+CT$/i, "").trim();
+}
+
+function formatOutputTimestamp(isoDate) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(isoDate)).reduce((result, part) => {
+    if (part.type !== "literal") result[part.type] = part.value;
+    return result;
+  }, {});
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}${parts.minute} CT`;
+}
+
 function publicPackage(pkg) {
   return withoutUndefined({
     id: pkg.id,
@@ -2784,15 +2885,21 @@ function publicPackage(pkg) {
 function extractJobContext(jobText, targetRole) {
   const lines = cleanJobLines(jobText);
   const role = cleanRoleLabel(targetRole || lines[0] || "Target Role");
-  let company = "Target Company";
+  let company = inferCompanyFromJobHeader(lines, role) || "Target Employer";
   for (const candidate of lines.slice(1, 7)) {
-    if (!/\$|\b\d{5}\b|, [A-Z]{2}\b|remote|full-time|part-time|responsib|require|skill|job post/i.test(candidate) && candidate.length <= 90) {
+    if (
+      company === "Target Employer" &&
+      !/\$|\b\d{5}\b|, [A-Z]{2}\b|remote|full-time|part-time|responsib|require|skill|job post/i.test(candidate) &&
+      !sameNormalizedText(candidate, role) &&
+      candidate.length <= 90
+    ) {
       company = candidate;
       break;
     }
   }
-  const responsibilities = lines.filter((line) => /responsib|duties|manage|support|coordinate|develop|maintain|create|communicat|assist|lead|analy/i.test(line)).slice(0, RESPONSIBILITY_COUNT);
-  const requirements = lines.filter((line) => /require|qualification|experience|skill|ability|preferred|must|knowledge|proficien/i.test(line)).slice(0, REQUIREMENT_COUNT);
+  const usableLines = lines.filter((line) => !isJobPostNoiseLine(line) && !sameNormalizedText(line, role) && !sameNormalizedText(line, company));
+  const responsibilities = usableLines.filter((line) => /responsib|duties|manage|support|coordinate|develop|maintain|create|communicat|assist|lead|analy/i.test(line)).slice(0, RESPONSIBILITY_COUNT);
+  const requirements = usableLines.filter((line) => /require|qualification|experience|skill|ability|preferred|must|knowledge|proficien/i.test(line)).slice(0, REQUIREMENT_COUNT);
   return { role, company, responsibilities, requirements, lines };
 }
 
@@ -2800,10 +2907,40 @@ function cleanJobLines(text) {
   return cleanMultilineTextForAi(text)
     .split(/\r?\n+/)
     .flatMap((line) => line.split(/[•●]/g))
-    .map((line) => line.replace(/\bSJE\s*\d+(?:\.\d+)*\b/gi, " ").replace(/^[*-]\s*/, "").replace(/\s+/g, " ").trim())
+    .map((line) => line.replace(/\bSJE\s+\d+(?:\.\d+)*\b/gi, " ").replace(/^[*-]\s*/, "").replace(/\s+/g, " ").trim())
     .filter(Boolean)
     .filter((line) => !["profile insights", "job details", "full job description"].includes(line.toLowerCase()))
     .filter((line) => !/^job post(?:ing)?\b/i.test(line));
+}
+
+function inferCompanyFromJobHeader(lines, role) {
+  for (const line of lines.slice(0, 4)) {
+    const header = asText(line).split(/\s[-|]\s/)[0];
+    const acronymMatches = header.match(/\b[A-Z][A-Z0-9&]{1,10}\b/g) || [];
+    const candidates = acronymMatches.filter((value) => !["IT", "AM", "PM", "HR", "FT", "PT"].includes(value));
+    if (candidates.length) return candidates[candidates.length - 1];
+    const compactRole = normalizeComparable(role);
+    const compactHeader = normalizeComparable(header);
+    if (compactRole && compactHeader.startsWith(compactRole)) {
+      const remainder = header.slice(role.length).trim();
+      if (/^[A-Z][A-Za-z0-9& .-]{1,40}$/.test(remainder)) return cleanBoundedString(remainder, 80);
+    }
+  }
+  return "";
+}
+
+function normalizeComparable(value) {
+  return asText(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function sameNormalizedText(a, b) {
+  const left = normalizeComparable(a);
+  const right = normalizeComparable(b);
+  return Boolean(left && right && left === right);
+}
+
+function digitsOnly(value) {
+  return asText(value).replace(/\D+/g, "");
 }
 
 function inferSkills(input, job, candidateSource = normalizeCandidateSource(input.workHistory, input)) {
@@ -2846,12 +2983,13 @@ function skillValue(skill, job, candidateSource = normalizeCandidateSource("")) 
   if (candidateLine) return clipText(candidateLine, 118);
   const skillLine = candidateSource.skills.find((line) => keywordMatchesLine(skill, line));
   if (skillLine) return clipText(skillLine.replace(/^[^:]{1,40}:\s*/, ""), 118);
-  const source = job.requirements.concat(job.responsibilities).find((line) => {
+  const requirement = job.requirements.concat(job.responsibilities).find((line) => {
     const firstWord = asText(skill).split(/\s+/)[0];
     return firstWord && new RegExp(`\\b${escapeRegExp(firstWord)}\\b`, "i").test(line) && isUsableJobRequirementLine(line);
   });
-  const detail = cleanEvidenceLine(source || SOURCE_PLACEHOLDER);
-  return clipText(detail, 118);
+  return requirement
+    ? clipText(`Job asks for this; add candidate proof before claiming it.`, 118)
+    : SOURCE_EVIDENCE_NEEDED;
 }
 
 function keywordMatchesLine(skill, line) {
@@ -2906,7 +3044,7 @@ function cleanRoleLabel(value) {
   return clipText(
     asText(value, "Target Role")
       .replace(/\s*[-|:]\s*job post(?:ing)?\b.*$/i, "")
-      .replace(/\bSJE\s*\d+(?:\.\d+)*\b/gi, "")
+      .replace(/\bSJE\s+\d+(?:\.\d+)*\b/gi, "")
       .replace(/\s+/g, " ")
       .trim(),
     80,
@@ -2991,7 +3129,7 @@ function cleanCandidateEvidenceText(line, input = {}) {
     .replace(/\bConnected experience to\b[^.]{0,120}/i, "")
     .replace(/\bStrongest fit themes:\s*/i, "")
     .replace(/\bSenior IT Systems Engineer-\s*/gi, "Senior IT Systems Engineer ")
-    .replace(/\bSJE\s*\d*(?:\.\d+)*/gi, " ")
+    .replace(/\bSJE\s+\d+(?:\.\d+)*/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
   const fullName = asText(input.fullName);

@@ -199,6 +199,41 @@ describe("ResumeDoc generator", () => {
     expect(bulletDetails.every((detail) => detail.includes("Confirm") || source.workEvidence.includes(detail))).toBe(true);
   });
 
+  it("keeps PII and job-post headers out of generated packet body content", async () => {
+    const text = await docxText("reference files/Joseph Rice - Systems Administrator.docx");
+    const input = api.normalizeInput({
+      fullName: "Joseph Rice",
+      email: "jmjrice94@gmail.com",
+      phone: "2623487425",
+      location: "Saint Paul, Minnesota",
+      targetRole: "Systems Administrator",
+      jobPost: [
+        "SENIOR IT SYSTEMS ENGINEER SJE - Plymouth or New Hope, MN Hybrid | Full-Time | Monday - Friday, 8:00 AM - 5:00 PM",
+        "Responsibilities include administering systems, troubleshooting issues, supporting users, and documenting procedures.",
+        "Requirements include systems administration experience, communication, and problem solving.",
+      ].join("\n"),
+      workHistory: text,
+    });
+    const response = api.validateResponse(api.localResponseFromInput(input), input);
+    const bodyText = JSON.stringify({
+      page_1: response.page_1,
+      skill_tracker: response.skill_tracker,
+      interview_prep: response.interview_prep,
+      company_role_brief: response.company_role_brief,
+      match_rationale: response.match_rationale,
+    });
+
+    expect(response.company).toBe("SJE");
+    expect(bodyText).not.toMatch(/Joseph Rice|jmjrice94@gmail\.com|2623487425|Saint Paul/i);
+    expect(bodyText).not.toMatch(/Plymouth|New Hope|Hybrid|Monday|8:00 AM|Candidate-provided work history|Targeted Resume Brief|Target Company/i);
+    expect(response.page_1.skill_items.map((item) => item.value).join("\n")).not.toMatch(/SENIOR IT SYSTEMS ENGINEER/i);
+  });
+
+  it("appends a minute timestamp to generated output titles", () => {
+    expect(api.outputTitleWithTimestamp("SJE Systems Administrator", "2026-05-26T17:04:30.000Z")).toBe("SJE Systems Administrator - 2026-05-26 1204 CT");
+    expect(api.outputTitleWithTimestamp("SJE Systems Administrator - 2026-05-26 1204 CT", "2026-05-26T17:05:01.000Z")).toBe("SJE Systems Administrator - 2026-05-26 1205 CT");
+  });
+
   it("flags the bad-output documents as generated packet source issues", async () => {
     const badDir = path.join(referenceDir, "Bad Outputs");
     const files = fs.readdirSync(badDir).filter((file) => file.endsWith(".docx"));
