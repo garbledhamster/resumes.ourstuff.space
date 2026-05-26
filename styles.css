@@ -529,6 +529,46 @@ select:focus {
   white-space: pre-wrap;
 }
 
+.resume-manager-list {
+  display: grid;
+  gap: 10px;
+}
+
+.resume-package-card {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 13px;
+}
+
+.resume-package-card.active {
+  border-color: #9bbcff;
+  background: #f5f9ff;
+}
+
+.resume-package-head,
+.resume-package-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.resume-package-head strong {
+  overflow-wrap: anywhere;
+}
+
+.resume-package-card small {
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.resume-package-actions .button {
+  flex: 1;
+}
+
 .admin-panel {
   margin-top: 4px;
 }
@@ -926,9 +966,14 @@ select:focus {
   .upload-strip,
   .code-row,
   .compact-row,
+  .resume-package-actions,
   .notes-toolbar,
   .steps {
     grid-template-columns: 1fr;
+  }
+
+  .resume-package-actions {
+    display: grid;
   }
 
   .layout {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import JSZip from "jszip";
 import functions from "./index.js";
 
 const api = functions._test;
@@ -44,8 +45,20 @@ describe("ResumeDoc generator", () => {
     expect(text).toContain("Jane Applicant");
     expect(text).toContain("OPERATIONS COORDINATOR");
     expect(text).not.toContain("Joe Rice");
+    expect(text).not.toContain("Joseph");
+    expect(text).not.toContain("System Administrator");
     expect(text).not.toContain("Michael Johnson");
     expect(output.trackerPng.length).toBeGreaterThan(5000);
+  });
+
+  it("scrubs source-template terms from document XML metadata", async () => {
+    const input = sampleInput();
+    const response = api.validateResponse(api.localResponseFromInput(input), input);
+    const output = await api.buildDocx(response, input);
+    const zip = await JSZip.loadAsync(output.docx);
+    const xml = await zip.file("word/document.xml").async("string");
+
+    expect(xml).not.toMatch(/Joseph|Joe Rice|System Administrator|IT Generalist|Michael Johnson/i);
   });
 });
 

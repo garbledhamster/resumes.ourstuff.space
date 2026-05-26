@@ -98,6 +98,19 @@ app.post("/api/packages", requireActor, asyncHandler(async (req, res) => {
   res.status(201).json({ ok: true, package: publicPackage(pkg) });
 }));
 
+app.get("/api/packages", requireActor, asyncHandler(async (req, res) => {
+  const snap = await db()
+    .collection("resume_packages")
+    .where("ownerUid", "==", req.actor.uid)
+    .limit(60)
+    .get();
+  const packages = snap.docs
+    .map((doc) => publicPackage({ id: doc.id, ...doc.data() }))
+    .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))
+    .slice(0, 30);
+  res.json({ ok: true, packages });
+}));
+
 app.get("/api/packages/:id", requireActor, asyncHandler(async (req, res) => {
   const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
   const synced = await syncPackageAccess(req, pkg);
@@ -1354,7 +1367,7 @@ async function buildDocx(response, input) {
   let updatedXml = new XMLSerializer().serializeToString(dom);
   updatedXml = replaceAccent(updatedXml, SOURCE_ACCENT_HEX, sanitizeHex(input.accentHex || DEFAULT_ACCENT_HEX));
   updatedXml = scrubSourceTemplateTermsXml(updatedXml, response, input);
-  scanLeftoversXml(updatedXml, response);
+  scanLeftoversXml(updatedXml, response, input);
   zip.file(xmlPath, updatedXml);
 
   const modifiedDom = new DOMParser().parseFromString(updatedXml, "application/xml");
@@ -1613,7 +1626,7 @@ function scrubSourceTemplateTermsXml(xml, response, input) {
   ]);
   let output = xml;
   for (const [source, target] of replacements.entries()) {
-    output = output.replace(new RegExp(escapeRegExp(source), "g"), escapeXml(target));
+    output = output.replace(new RegExp(escapeRegExp(source), "gi"), escapeXml(target));
   }
   return output;
 }
@@ -1733,8 +1746,21 @@ function initialsFromName(name) {
   return parts.slice(0, 2).map((part) => part[0].toUpperCase()).join("");
 }
 
-function scanLeftoversXml(xml, response) {
-  const allowed = `${response.company || ""} ${response.role || ""}`.toLowerCase();
+function scanLeftoversXml(xml, response, input = {}) {
+  const cards = response.profile_cards || {};
+  const allowed = [
+    response.company,
+    response.role,
+    input.fullName,
+    input.targetRole,
+    input.jobPost,
+    input.workHistory,
+    input.notes,
+    cards.interviewer?.name,
+    cards.interviewer?.title,
+    cards.interviewee?.name,
+    cards.interviewee?.title,
+  ].join(" ").toLowerCase();
   const haystack = xml.toLowerCase();
   const found = LEFTOVER_TERMS.filter((term) => !allowed.includes(term.toLowerCase()) && haystack.includes(term.toLowerCase()));
   if (found.length) {

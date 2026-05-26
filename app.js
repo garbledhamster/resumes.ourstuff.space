@@ -27,6 +27,8 @@ const state = {
   idToken: "",
   firebaseReady: false,
   activePackage: null,
+  packages: [],
+  packagesLoaded: false,
   access: null,
   apiBaseOverride: "",
   notes: [],
@@ -87,6 +89,9 @@ const els = {
   generateBtn: document.querySelector("#generateBtn"),
   downloadText: document.querySelector("#downloadText"),
   downloadBtn: document.querySelector("#downloadBtn"),
+  resumeManagerEmpty: document.querySelector("#resumeManagerEmpty"),
+  resumeManagerList: document.querySelector("#resumeManagerList"),
+  refreshPackagesBtn: document.querySelector("#refreshPackagesBtn"),
   revisionText: document.querySelector("#revisionText"),
   revisionBtn: document.querySelector("#revisionBtn"),
   activityLog: document.querySelector("#activityLog"),
@@ -173,7 +178,16 @@ function setActivePackage(pkg) {
   if (pkg?.id && activePackageKey()) {
     localStorage.setItem(activePackageKey(), pkg.id);
   }
+  upsertPackage(pkg);
   render();
+}
+
+function upsertPackage(pkg) {
+  if (!pkg?.id) return;
+  const existing = state.packages.filter((item) => item.id !== pkg.id);
+  state.packages = [pkg, ...existing].sort((a, b) =>
+    String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")),
+  );
 }
 
 function packageInput() {
@@ -326,7 +340,9 @@ function render() {
   els.checkoutBtn.disabled = !state.user || !pkg || unlocked || state.busy;
   els.generateBtn.disabled = !canGenerate();
   els.downloadBtn.disabled = !state.user || !pkg?.latestGenerationId || state.busy;
+  els.refreshPackagesBtn.disabled = !state.user || state.busy;
   els.revisionBtn.disabled = !canRevise() || !els.revisionText.value.trim();
+  renderPackageManager();
   renderNotesDrawer();
   renderAdmin();
 
@@ -495,6 +511,7 @@ async function initializeFirebase() {
     if (user) {
       log("Signed in.");
       await loadAccess();
+      await loadPackages();
       await loadActivePackage();
       startNotesListener(user.uid);
       await handlePaymentReturn();
@@ -503,6 +520,8 @@ async function initializeFirebase() {
       stopNotesListener();
       state.notes = [];
       state.notesLoaded = false;
+      state.packages = [];
+      state.packagesLoaded = false;
       state.activeNoteId = null;
       state.jobelMessages = [];
       state.access = null;
@@ -577,6 +596,7 @@ async function savePackage() {
           body: JSON.stringify({ input }),
         });
     setActivePackage(result.package);
+    await loadPackages();
     log("Package saved.");
     return result.package;
   } catch (error) {
@@ -590,12 +610,31 @@ async function savePackage() {
 async function loadActivePackage() {
   const id = new URLSearchParams(window.location.search).get("package_id") || localStorage.getItem(activePackageKey());
   if (!id) return;
+  await loadPackageById(id);
+}
+
+async function loadPackageById(id) {
   try {
     const result = await api(`/packages/${encodeURIComponent(id)}`);
     setActivePackage(result.package);
     if (result.input) setPackageInput(result.input);
+    log("Package loaded.");
   } catch (error) {
     log(error.message);
+  }
+}
+
+async function loadPackages() {
+  if (!state.user) return;
+  try {
+    const result = await api("/packages");
+    state.packages = Array.isArray(result.packages) ? result.packages : [];
+    state.packagesLoaded = true;
+  } catch (error) {
+    state.packagesLoaded = true;
+    log(error.message);
+  } finally {
+    render();
   }
 }
 
@@ -622,6 +661,7 @@ async function startCheckout() {
     if (data.checkout?.checkoutSkipped) {
       setActivePackage(data.checkout.package || pkg);
       await loadAccess();
+      await loadPackages();
       log("Package already unlocked.");
       return;
     }
@@ -645,6 +685,7 @@ async function claimFreePackage() {
     });
     setActivePackage(result.package);
     state.access = result.access;
+    await loadPackages();
     log("Package unlocked.");
   } catch (error) {
     log(error.message);
@@ -665,6 +706,7 @@ async function redeemCode() {
     });
     setActivePackage(result.package);
     state.access = result.access;
+    await loadPackages();
     log("Code applied.");
   } catch (error) {
     log(error.message);
@@ -688,6 +730,7 @@ async function handlePaymentReturn() {
     });
     setActivePackage(result.package);
     await loadAccess();
+    await loadPackages();
     log("Payment confirmed.");
     params.delete("resume_payment");
     params.delete("session_id");
@@ -710,6 +753,7 @@ async function generateDocx() {
       body: JSON.stringify({}),
     });
     setActivePackage(result.package);
+    await loadPackages();
     log("DOCX generated.");
   } catch (error) {
     log(error.message);
@@ -730,6 +774,7 @@ async function submitRevision() {
     });
     els.revisionText.value = "";
     setActivePackage(result.package);
+    await loadPackages();
     log("Revision generated.");
   } catch (error) {
     log(error.message);
@@ -741,9 +786,14 @@ async function submitRevision() {
 async function downloadDocx() {
   const pkg = state.activePackage;
   if (!pkg?.latestGenerationId) return;
+  await downloadPackageDocx(pkg.id, pkg.title);
+}
+
+async function downloadPackageDocx(packageId, title) {
+  if (!packageId) return;
   setBusy(true);
   try {
-    const blob = await api(`/packages/${encodeURIComponent(pkg.id)}/download/docx`, {
+    const blob = await api(`/packages/${encodeURIComponent(packageId)}/download/docx`, {
       method: "GET",
       blob: true,
       headers: {},
@@ -751,7 +801,7 @@ async function downloadDocx() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${safeFileName(pkg.title || "ResumeDoc packet")}.docx`;
+    link.download = `${safeFileName(title || "ResumeDoc packet")}.docx`;
     document.body.append(link);
     link.click();
     link.remove();
@@ -1040,6 +1090,37 @@ function renderNotesDrawer() {
   }
   els.newNoteBtn.disabled = !state.user || state.busy;
   els.sendJobelBtn.disabled = !state.user || state.busy || !els.jobelInput.value.trim();
+}
+
+function renderPackageManager() {
+  if (!els.resumeManagerList || !els.resumeManagerEmpty) return;
+  const packages = state.packages || [];
+  els.resumeManagerEmpty.classList.toggle("hidden", Boolean(packages.length));
+  els.resumeManagerEmpty.textContent = state.user
+    ? state.packagesLoaded
+      ? "No saved ResumeDoc packages yet."
+      : "Loading saved packages..."
+    : "Sign in to see packages saved to your ResumeDoc account.";
+  els.resumeManagerList.innerHTML = packages.map(packageCardHtml).join("");
+}
+
+function packageCardHtml(pkg) {
+  const isActive = pkg.id === state.activePackage?.id;
+  const ready = Boolean(pkg.latestGenerationId);
+  const date = pkg.generatedAt || pkg.updatedAt || pkg.createdAt;
+  return `
+    <article class="resume-package-card ${isActive ? "active" : ""}" data-package-id="${escapeHtml(pkg.id)}">
+      <div class="resume-package-head">
+        <strong>${escapeHtml(pkg.title || "Resume package")}</strong>
+        <span class="pill ${ready ? "good" : "neutral"}">${ready ? "DOCX ready" : "Draft"}</span>
+      </div>
+      <small>${escapeHtml(date ? shortDate(date) : "Saved package")}</small>
+      <div class="resume-package-actions">
+        <button class="button" type="button" data-package-action="load">Load</button>
+        <button class="button primary" type="button" data-package-action="download" ${ready ? "" : "disabled"}>Download</button>
+      </div>
+    </article>
+  `;
 }
 
 function noteCardHtml(note) {
@@ -1482,6 +1563,20 @@ els.redeemCodeBtn.addEventListener("click", redeemCode);
 els.checkoutBtn.addEventListener("click", startCheckout);
 els.generateBtn.addEventListener("click", generateDocx);
 els.downloadBtn.addEventListener("click", downloadDocx);
+els.refreshPackagesBtn.addEventListener("click", loadPackages);
+els.resumeManagerList.addEventListener("click", async (event) => {
+  const action = event.target.closest("[data-package-action]")?.dataset.packageAction;
+  const card = event.target.closest("[data-package-id]");
+  if (!action || !card) return;
+  const id = card.dataset.packageId;
+  const pkg = state.packages.find((item) => item.id === id);
+  if (action === "load") {
+    await loadPackageById(id);
+  }
+  if (action === "download" && pkg?.latestGenerationId) {
+    await downloadPackageDocx(id, pkg.title);
+  }
+});
 els.revisionBtn.addEventListener("click", submitRevision);
 els.resumeFile.addEventListener("change", () => extractFileText(els.resumeFile.files?.[0]));
 els.notesLauncherBtn.addEventListener("click", () => openNotesDrawer("notes"));
