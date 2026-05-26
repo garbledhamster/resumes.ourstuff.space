@@ -12,6 +12,8 @@ const referenceDir = path.join(repoRoot, "reference files");
 const originalFetch = globalThis.fetch;
 const originalAiBrainToken = process.env.AI_BRAIN_API_TOKEN;
 const originalOpenRouterKey = process.env.OPENROUTER_API_KEY;
+const originalOpenRouterModel = process.env.OPENROUTER_MODEL;
+const originalOpenRouterPacketModel = process.env.OPENROUTER_PACKET_MODEL;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -19,6 +21,10 @@ afterEach(() => {
   else process.env.AI_BRAIN_API_TOKEN = originalAiBrainToken;
   if (originalOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
   else process.env.OPENROUTER_API_KEY = originalOpenRouterKey;
+  if (originalOpenRouterModel === undefined) delete process.env.OPENROUTER_MODEL;
+  else process.env.OPENROUTER_MODEL = originalOpenRouterModel;
+  if (originalOpenRouterPacketModel === undefined) delete process.env.OPENROUTER_PACKET_MODEL;
+  else process.env.OPENROUTER_PACKET_MODEL = originalOpenRouterPacketModel;
   vi.restoreAllMocks();
 });
 
@@ -212,10 +218,14 @@ describe("ResumeDoc generator", () => {
 
   it("sends targeted chunks and carries compact memory between OpenRouter section prompts", async () => {
     process.env.OPENROUTER_API_KEY = "test-openrouter-key";
+    process.env.OPENROUTER_MODEL = "openrouter/auto";
+    process.env.OPENROUTER_PACKET_MODEL = "anthropic/claude-sonnet-4";
     const prompts = [];
+    const payloads = [];
     globalThis.fetch = vi.fn(async (_url, options) => {
       const payload = JSON.parse(options.body);
       const prompt = JSON.parse(payload.messages[1].content);
+      payloads.push(payload);
       prompts.push(prompt);
       return responseJson({
         choices: [{
@@ -245,6 +255,9 @@ describe("ResumeDoc generator", () => {
     const response = await api.buildPacketResponseWithOpenRouter(input, "");
 
     expect(prompts).toHaveLength(6);
+    expect(payloads.every((payload) => payload.model === "~openai/gpt-latest")).toBe(true);
+    expect(payloads.every((payload) => payload.reasoning?.effort === "low")).toBe(true);
+    expect(payloads.every((payload) => payload.reasoning?.exclude === true)).toBe(true);
     expect(prompts[0].input_context.source_chunks.map((chunk) => chunk.type)).toContain("work_history");
     expect(prompts[3].input_context.source_chunks.some((chunk) => chunk.type === "work_history")).toBe(false);
     expect(prompts[0].instructions.join(" ")).toContain("Faithfully reformulate");
@@ -256,6 +269,108 @@ describe("ResumeDoc generator", () => {
 });
 
 describe("ResumeDoc notes and Jobel safety helpers", () => {
+  it("organizes job postings and work history with deterministic fallbacks", () => {
+    const job = api.localOrganizedSource("job_posting", {
+      targetRole: "Operations Coordinator",
+      text: [
+        "Operations Coordinator",
+        "Acme Company",
+        "Responsibilities include scheduling and customer follow-up.",
+        "Requirements include Excel and detail orientation.",
+      ].join("\n"),
+    });
+    const history = api.localOrganizedSource("work_history", {
+      existingText: "Managed a ticket queue for internal users.",
+      text: "Managed a ticket queue for internal users.\nCreated weekly reports for leadership.",
+    });
+
+    expect(job.body).toContain("# Job posting reference");
+    expect(job.body).toContain("Acme Company");
+    expect(history.body).toContain("# Work history reference");
+    expect(history.body.match(/Managed a ticket queue/g)).toHaveLength(1);
+    expect(history.body).toContain("Created weekly reports");
+  });
+
+  it("preserves job-posting note metadata", () => {
+    const note = api.normalizeResumeNote({
+      id: "job-note-1",
+      owner: "user-1",
+      title: "Posting",
+      body: "A useful job posting.",
+      metadata: {
+        source: "user",
+        kind: "job_posting",
+        marker: "resumedoc:job-posting",
+        contentFormat: "markdown",
+      },
+    });
+
+    expect(api.isJobPostingNote(note)).toBe(true);
+    expect(note.metadata.kind).toBe("job_posting");
+    expect(note.metadata.marker).toBe("resumedoc:job-posting");
+    expect(note.metadata.readOnly).toBe(false);
+  });
+
+  it("normalizes the durable work history profile", () => {
+    const profile = api.normalizeWorkHistoryProfile({
+      id: "workHistory",
+      owner: "user-1",
+      body: "Created weekly reports.",
+      sourceHash: "abc123",
+      metadata: { source: "resumedoc", organizedAt: "2026-05-26T00:00:00.000Z" },
+    });
+
+    expect(profile.id).toBe("workHistory");
+    expect(profile.metadata.kind).toBe("work_history");
+    expect(profile.body).toContain("Created weekly reports");
+  });
+
+  it("stores only identity and source references in package input", () => {
+    const input = api.normalizePackageInput({
+      ...sampleInput(),
+      jobPostNoteId: "note-123",
+      workHistoryProfileId: "workHistory",
+      notes: "Do not save this.",
+      extraDirection: "Do not save this either.",
+    });
+
+    expect(input).toEqual({
+      fullName: "Jane Applicant",
+      email: "jane@example.com",
+      phone: "555-555-5555",
+      location: "Minneapolis, MN",
+      targetRole: "Operations Coordinator",
+      jobPostNoteId: "note-123",
+      workHistoryProfileId: "workHistory",
+    });
+    expect(input).not.toHaveProperty("jobPost");
+    expect(input).not.toHaveProperty("workHistory");
+    expect(input).not.toHaveProperty("notes");
+    expect(input).not.toHaveProperty("extraDirection");
+  });
+
+  it("builds generation context from saved source references", () => {
+    const saved = api.normalizePackageInput({
+      fullName: "Jane Applicant",
+      email: "jane@example.com",
+      phone: "555-555-5555",
+      location: "Minneapolis, MN",
+      targetRole: "Operations Coordinator",
+      jobPostNoteId: "note-123",
+      workHistoryProfileId: "workHistory",
+    });
+    const input = api.composeInputWithReferences(saved, {
+      jobPost: "Operations Coordinator\nAcme Company\nRequirements include Excel.",
+      workHistory: "Created weekly reports for leadership.",
+    });
+    const baseline = api.localResponseFromInput(input);
+    const context = api.packetPromptContext(input, "", baseline);
+
+    expect(context.source_chunks.some((chunk) => chunk.type === "job_requirements")).toBe(true);
+    expect(context.source_chunks.some((chunk) => chunk.type === "work_history" && chunk.text.includes("Created weekly reports"))).toBe(true);
+    expect(JSON.stringify(context)).not.toContain("note-123");
+  });
+
   it("uses stable note hashes and detects changed note bodies", () => {
     const note = api.normalizeResumeNote({
       id: "note-1",

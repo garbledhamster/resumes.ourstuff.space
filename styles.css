@@ -822,6 +822,10 @@ select:focus {
   border-left-color: var(--coral);
 }
 
+.note-card.job-posting {
+  border-left-color: var(--green);
+}
+
 .note-card.active {
   outline: 3px solid rgba(37, 99, 235, 0.14);
 }

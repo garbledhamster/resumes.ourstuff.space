@@ -20,10 +20,13 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const PROMPT_VERSION = "2026-05-26-resumedoc-source-fidelity";
 const RESUMEDOC_APP_ID = "resumedoc";
 const JOBEL_NOTE_MARKER = "ai:jobel-note";
+const JOB_POSTING_NOTE_MARKER = "resumedoc:job-posting";
+const WORK_HISTORY_PROFILE_ID = "workHistory";
 const AI_BRAIN_DEFAULT_BASE = "https://api.ourstuff.space/v1";
 const SOURCE_ACCENT_HEX = "E97132";
 const DEFAULT_ACCENT_HEX = SOURCE_ACCENT_HEX;
-const DEFAULT_PACKET_MODEL = "anthropic/claude-sonnet-4";
+const RESUME_PACKET_MODEL = "~openai/gpt-latest";
+const RESUME_PACKET_REASONING = Object.freeze({ effort: "low", exclude: true });
 const SKILL_ITEM_COUNT = 9;
 const EXPERIENCE_BULLET_COUNT = 7;
 const ABOUT_ME_COUNT = 6;
@@ -149,7 +152,7 @@ app.get("/api/me/access", requireActor, asyncHandler(async (req, res) => {
 
 app.post("/api/packages", requireActor, asyncHandler(async (req, res) => {
   const actor = req.actor;
-  const input = normalizeInput(req.body?.input || req.body || {});
+  const input = normalizePackageInput(req.body?.input || req.body || {});
   const id = crypto.randomUUID();
   const now = nowIso();
   const inputStoragePath = inputPath(actor.uid, id);
@@ -172,6 +175,9 @@ app.post("/api/packages", requireActor, asyncHandler(async (req, res) => {
     updatedAt: now,
   });
   await packageRef(id).set(pkg);
+  if (input.jobPostNoteId) {
+    await resumeNoteRef(actor.uid, input.jobPostNoteId).set({ packageId: id, updatedAt: now }, { merge: true });
+  }
   res.status(201).json({ ok: true, package: publicPackage(pkg) });
 }));
 
@@ -191,14 +197,14 @@ app.get("/api/packages", requireActor, asyncHandler(async (req, res) => {
 app.get("/api/packages/:id", requireActor, asyncHandler(async (req, res) => {
   const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
   const synced = await syncPackageAccess(req, pkg);
-  const input = await loadJson(pkg.inputStoragePath, {});
+  const input = await loadPackageInputForUse(req.actor.uid, pkg);
   res.json({ ok: true, package: publicPackage(synced), input });
 }));
 
 app.patch("/api/packages/:id", requireActor, asyncHandler(async (req, res) => {
   const actor = req.actor;
   const pkg = await getOwnedPackage(req.params.id, actor.uid);
-  const input = normalizeInput(req.body?.input || {});
+  const input = normalizePackageInput(req.body?.input || {});
   const inputStoragePath = pkg.inputStoragePath || inputPath(actor.uid, pkg.id);
   await saveJson(inputStoragePath, input);
   const patch = withoutUndefined({
@@ -207,8 +213,26 @@ app.patch("/api/packages/:id", requireActor, asyncHandler(async (req, res) => {
     updatedAt: nowIso(),
   });
   await packageRef(pkg.id).set(patch, { merge: true });
+  if (input.jobPostNoteId) {
+    await resumeNoteRef(actor.uid, input.jobPostNoteId).set({ packageId: pkg.id, updatedAt: patch.updatedAt }, { merge: true });
+  }
   const updated = { ...pkg, ...patch };
   res.json({ ok: true, package: publicPackage(updated) });
+}));
+
+app.post("/api/sources/prepare", requireActor, asyncHandler(async (req, res) => {
+  const input = normalizeInput(req.body?.input || req.body || {});
+  const packageId = cleanBoundedString(req.body?.packageId, 160);
+  const jobPostNoteId = cleanBoundedString(req.body?.jobPostNoteId || req.body?.input?.jobPostNoteId, 160);
+  const prepared = await prepareResumeSources({
+    uid: req.actor.uid,
+    packageId,
+    jobPostNoteId,
+    targetRole: input.targetRole,
+    jobPost: input.jobPost,
+    workHistory: input.workHistory,
+  });
+  res.json({ ok: true, ...prepared });
 }));
 
 app.get("/api/packages/:id/access", requireActor, asyncHandler(async (req, res) => {
@@ -289,7 +313,8 @@ app.post("/api/packages/:id/confirm-payment", requireActor, asyncHandler(async (
 app.post("/api/packages/:id/generate", requireActor, asyncHandler(async (req, res) => {
   const pkg = await getOwnedPackage(req.params.id, req.actor.uid);
   const unlockedPkg = await requireUnlockedPackage(req, pkg);
-  const input = normalizeInput(await loadJson(pkg.inputStoragePath, {}));
+  const extraDirection = cleanBoundedString(req.body?.extraDirection, 6000);
+  const input = await loadPackageInputForUse(req.actor.uid, pkg, { extraDirection });
   const result = await generateAndStore({
     actor: req.actor,
     pkg: unlockedPkg,
@@ -314,7 +339,7 @@ app.post("/api/packages/:id/revisions", requireActor, asyncHandler(async (req, r
   if (!instruction) {
     throw httpError(400, "Revision instruction is required.", "missing_instruction");
   }
-  const input = normalizeInput(await loadJson(pkg.inputStoragePath, {}));
+  const input = await loadPackageInputForUse(req.actor.uid, pkg);
   const result = await generateAndStore({
     actor: req.actor,
     pkg: unlockedPkg,
@@ -485,7 +510,7 @@ app.post("/api/jobel/chat", requireActor, asyncHandler(async (req, res) => {
     ? req.body.noteIds.map((id) => cleanBoundedString(id, 160)).filter(Boolean).slice(0, 12)
     : [];
   const pkg = packageId ? await getOwnedPackage(packageId, req.actor.uid).catch(() => null) : null;
-  const input = pkg?.inputStoragePath ? normalizeInput(await loadJson(pkg.inputStoragePath, {})) : {};
+  const input = pkg?.inputStoragePath ? await loadPackageInputForUse(req.actor.uid, pkg) : {};
   const notes = await loadResumeNotesForJobel(req.actor.uid, noteIds);
   const prompt = await buildJobelPrompt({
     message,
@@ -528,12 +553,17 @@ exports._test = {
   buildPacketResponseWithOpenRouter,
   buildJobelPrompt,
   cleanMultilineTextForAi,
+  composeInputWithReferences,
   detectSourceQualityIssues,
+  isJobPostingNote,
+  localOrganizedSource,
   rememberNoteInBrain,
   localResponseFromInput,
   normalizeCandidateSource,
   normalizeInput,
+  normalizePackageInput,
   normalizeResumeNote,
+  normalizeWorkHistoryProfile,
   noteSourceHash,
   packetPromptContext,
   sectionContextForTask,
@@ -639,6 +669,10 @@ function resumeNoteRef(uid, noteId) {
   return db().collection("users").doc(uid).collection("apps").doc(RESUMEDOC_APP_ID).collection("notes").doc(noteId);
 }
 
+function resumeProfileRef(uid, profileId) {
+  return db().collection("users").doc(uid).collection("apps").doc(RESUMEDOC_APP_ID).collection("profile").doc(profileId);
+}
+
 async function getOwnedPackage(id, ownerUid) {
   const snap = await packageRef(id).get();
   if (!snap.exists) {
@@ -685,9 +719,59 @@ async function loadResumeNotesForJobel(uid, noteIds) {
   return snap.docs.map((docSnap) => normalizeResumeNote({ id: docSnap.id, ...docSnap.data() }));
 }
 
+async function loadPackageInputForUse(uid, pkg, options = {}) {
+  const savedInput = await loadJson(pkg.inputStoragePath, {});
+  const sourceInput = await composeInputWithStoredReferences(uid, savedInput);
+  return normalizeInput({
+    ...sourceInput,
+    notes: options.extraDirection || sourceInput.notes || "",
+  });
+}
+
+async function composeInputWithStoredReferences(uid, savedInput = {}) {
+  const normalizedSaved = normalizeInput(savedInput);
+  const jobPostNoteId = cleanBoundedString(savedInput.jobPostNoteId, 160);
+  const workHistoryProfileId = cleanBoundedString(savedInput.workHistoryProfileId, 160);
+  const [jobPost, workHistoryProfile] = await Promise.all([
+    jobPostNoteId ? loadJobPostingNoteBody(uid, jobPostNoteId) : Promise.resolve(""),
+    workHistoryProfileId ? loadWorkHistoryProfile(uid) : Promise.resolve(normalizeWorkHistoryProfile({ id: WORK_HISTORY_PROFILE_ID })),
+  ]);
+  return composeInputWithReferences(savedInput, {
+    jobPost: jobPost || normalizedSaved.jobPost,
+    workHistory: workHistoryProfile.body || normalizedSaved.workHistory,
+    workHistoryProfile,
+  });
+}
+
+function composeInputWithReferences(savedInput = {}, sources = {}) {
+  const normalizedSaved = normalizeInput(savedInput);
+  return normalizeInput({
+    ...normalizedSaved,
+    jobPost: sources.jobPost || normalizedSaved.jobPost,
+    workHistory: sources.workHistory || normalizedSaved.workHistory,
+    notes: normalizedSaved.notes,
+  });
+}
+
+async function loadJobPostingNoteBody(uid, noteId) {
+  try {
+    const note = await getOwnedResumeNote(uid, noteId);
+    return isJobPostingNote(note) ? note.body : "";
+  } catch {
+    return "";
+  }
+}
+
+async function loadWorkHistoryProfile(uid) {
+  const snap = await resumeProfileRef(uid, WORK_HISTORY_PROFILE_ID).get();
+  if (!snap.exists) return normalizeWorkHistoryProfile({ id: WORK_HISTORY_PROFILE_ID });
+  return normalizeWorkHistoryProfile({ id: snap.id, ...snap.data() });
+}
+
 function normalizeResumeNote(raw = {}) {
   const metadata = raw.metadata && typeof raw.metadata === "object" ? raw.metadata : {};
   const isJobel = metadata.source === "jobel" || metadata.marker === JOBEL_NOTE_MARKER;
+  const isJobPosting = metadata.kind === "job_posting" || metadata.marker === JOB_POSTING_NOTE_MARKER;
   const brainSync = raw.brainSync && typeof raw.brainSync === "object" ? raw.brainSync : {};
   return {
     id: cleanBoundedString(raw.id, 160),
@@ -700,7 +784,8 @@ function normalizeResumeNote(raw = {}) {
     updatedAt: cleanBoundedString(raw.updatedAt, 80),
     metadata: {
       source: isJobel ? "jobel" : "user",
-      marker: isJobel ? JOBEL_NOTE_MARKER : metadata.marker || null,
+      kind: isJobPosting ? "job_posting" : cleanBoundedString(metadata.kind, 80) || "note",
+      marker: isJobel ? JOBEL_NOTE_MARKER : isJobPosting ? JOB_POSTING_NOTE_MARKER : metadata.marker || null,
       readOnly: isJobel || metadata.readOnly === true,
       contentFormat: metadata.contentFormat === "markdown" ? "markdown" : "plain",
     },
@@ -869,6 +954,196 @@ async function loadJson(storagePath, fallback) {
     if (fallback !== undefined) return fallback;
     throw error;
   }
+}
+
+async function prepareResumeSources({ uid, packageId, jobPostNoteId, targetRole, jobPost, workHistory }) {
+  const currentWorkHistory = await loadWorkHistoryProfile(uid);
+  const now = nowIso();
+  const [organizedJobPost, organizedWorkHistory] = await Promise.all([
+    organizeSourceReference("job_posting", { text: jobPost, targetRole }),
+    organizeSourceReference("work_history", {
+      text: workHistory,
+      existingText: currentWorkHistory.body,
+      targetRole,
+    }),
+  ]);
+  const savedJobPost = await saveJobPostingReference(uid, {
+    noteId: jobPostNoteId,
+    packageId,
+    title: organizedJobPost.title,
+    body: organizedJobPost.body,
+    now,
+  });
+  const savedWorkHistory = await saveWorkHistoryReference(uid, {
+    existing: currentWorkHistory,
+    body: organizedWorkHistory.body,
+    now,
+  });
+  return {
+    sources: {
+      jobPostNoteId: savedJobPost.id,
+      workHistoryProfileId: savedWorkHistory.id,
+    },
+    jobPost: savedJobPost.body,
+    workHistory: savedWorkHistory.body,
+  };
+}
+
+async function organizeSourceReference(kind, context = {}) {
+  const cleanText = clipMultilineText(context.text, MAX_TEXT);
+  const existingText = clipMultilineText(context.existingText, MAX_TEXT);
+  if (process.env.OPENROUTER_API_KEY && cleanText) {
+    try {
+      const body = await callOpenRouterText(
+        [
+          "You organize ResumeDoc source material.",
+          "Return concise markdown only.",
+          "Do not invent facts, dates, employers, tools, credentials, compensation, or personal details.",
+        ].join(" "),
+        JSON.stringify({
+          kind,
+          targetRole: cleanBoundedString(context.targetRole, 180),
+          existingText: kind === "work_history" ? existingText : "",
+          text: cleanText,
+          instructions: kind === "job_posting"
+            ? "Organize this job posting into a reusable reference with role, company if present, responsibilities, requirements, logistics, and unknowns."
+            : "Merge the new work history into the existing user work-history reference. Deduplicate repeated lines and preserve only candidate-provided facts.",
+        }, null, 2),
+      );
+      return normalizeOrganizedSource(kind, body, context);
+    } catch (error) {
+      console.warn("source_organizer_failed", kind, error.message);
+    }
+  }
+  return localOrganizedSource(kind, context);
+}
+
+function normalizeOrganizedSource(kind, body, context = {}) {
+  const cleanBody = clipMultilineText(body, MAX_TEXT);
+  if (!cleanBody) return localOrganizedSource(kind, context);
+  const fallbackTitle = kind === "job_posting" ? "Job posting reference" : "Work history reference";
+  const titleLine = cleanBody.split("\n").find((line) => /^#\s+/.test(line));
+  return {
+    title: cleanBoundedString(titleLine ? titleLine.replace(/^#\s+/, "") : fallbackTitle, 120),
+    body: cleanBody,
+  };
+}
+
+function localOrganizedSource(kind, context = {}) {
+  if (kind === "job_posting") {
+    const input = normalizeInput({ targetRole: context.targetRole, jobPost: context.text });
+    const job = extractJobContext(input.jobPost, input.targetRole);
+    const body = [
+      "# Job posting reference",
+      "",
+      `Role: ${job.role || input.targetRole || "Unknown"}`,
+      `Company: ${job.company || "Unknown"}`,
+      "",
+      "## Responsibilities",
+      ...listOrPlaceholder(job.responsibilities),
+      "",
+      "## Requirements",
+      ...listOrPlaceholder(job.requirements),
+      "",
+      "## Source details",
+      ...listOrPlaceholder(job.lines.slice(0, 20)),
+    ].join("\n");
+    return normalizeOrganizedSource("job_posting", body, context);
+  }
+
+  const merged = uniqueSourceLines([
+    ...clipMultilineText(context.existingText, MAX_TEXT).split("\n"),
+    ...clipMultilineText(context.text, MAX_TEXT).split("\n"),
+  ]);
+  const source = normalizeCandidateSource(merged.join("\n"), {});
+  const evidence = source.workEvidence.length ? source.workEvidence : merged;
+  const body = [
+    "# Work history reference",
+    "",
+    "## Candidate-provided evidence",
+    ...listOrPlaceholder(evidence.slice(0, 120)),
+  ].join("\n");
+  return normalizeOrganizedSource("work_history", body, context);
+}
+
+function listOrPlaceholder(items) {
+  const values = (items || []).map((item) => clipText(item, 500)).filter(Boolean);
+  return values.length ? values.map((item) => `- ${item.replace(/^[-*]\s*/, "")}`) : ["- Unknown"];
+}
+
+function uniqueSourceLines(lines) {
+  const seen = new Set();
+  const result = [];
+  for (const line of lines || []) {
+    const clean = clipText(line, 800).replace(/^[-*]\s*/, "").trim();
+    if (!clean) continue;
+    if (/^#+\s+/.test(clean) || /^candidate-provided evidence$/i.test(clean)) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(clean);
+  }
+  return result;
+}
+
+async function saveJobPostingReference(uid, { noteId, packageId, title, body, now }) {
+  let ref = null;
+  if (noteId) {
+    try {
+      const current = await getOwnedResumeNote(uid, noteId);
+      if (isJobPostingNote(current)) ref = resumeNoteRef(uid, noteId);
+    } catch {}
+  }
+  if (!ref) {
+    ref = db().collection("users").doc(uid).collection("apps").doc(RESUMEDOC_APP_ID).collection("notes").doc();
+  }
+  const payload = withoutUndefined({
+    owner: uid,
+    appId: RESUMEDOC_APP_ID,
+    packageId: packageId || "",
+    title: cleanBoundedString(title, 120) || "Job posting reference",
+    body: clipText(body, MAX_TEXT),
+    createdAt: now,
+    updatedAt: now,
+    metadata: {
+      source: "user",
+      kind: "job_posting",
+      marker: JOB_POSTING_NOTE_MARKER,
+      readOnly: false,
+      contentFormat: "markdown",
+      organizedAt: now,
+      organizerVersion: PROMPT_VERSION,
+    },
+    syncToBrain: false,
+    brainSync: { status: "not_synced", sourceHash: null, memoryId: null, syncedAt: null, errorCode: null },
+  });
+  await ref.set(payload, { merge: true });
+  return normalizeResumeNote({ id: ref.id, ...payload });
+}
+
+async function saveWorkHistoryReference(uid, { existing, body, now }) {
+  const normalized = normalizeWorkHistoryProfile({
+    ...existing,
+    owner: uid,
+    appId: RESUMEDOC_APP_ID,
+    body,
+    sourceHash: stableSourceHash(body),
+    createdAt: existing.createdAt || now,
+    updatedAt: now,
+    metadata: {
+      source: "resumedoc",
+      kind: "work_history",
+      marker: "resumedoc:work-history",
+      organizedAt: now,
+      organizerVersion: PROMPT_VERSION,
+    },
+  });
+  await resumeProfileRef(uid, WORK_HISTORY_PROFILE_ID).set(withoutUndefined(normalized), { merge: true });
+  return normalized;
+}
+
+function stableSourceHash(value) {
+  return crypto.createHash("sha256").update(String(value || ""), "utf8").digest("hex");
 }
 
 function inputPath(uid, packageId) {
@@ -1353,6 +1628,30 @@ function packetPromptContext(input, revisionInstruction, baseline) {
   };
 }
 
+function isJobPostingNote(note) {
+  return note?.metadata?.kind === "job_posting" || note?.metadata?.marker === JOB_POSTING_NOTE_MARKER;
+}
+
+function normalizeWorkHistoryProfile(raw = {}) {
+  const metadata = raw.metadata && typeof raw.metadata === "object" ? raw.metadata : {};
+  return {
+    id: cleanBoundedString(raw.id, 160) || WORK_HISTORY_PROFILE_ID,
+    owner: cleanBoundedString(raw.owner, 160),
+    appId: cleanBoundedString(raw.appId, 80) || RESUMEDOC_APP_ID,
+    body: clipText(asText(raw.body), MAX_TEXT),
+    sourceHash: cleanBoundedString(raw.sourceHash, 128),
+    createdAt: cleanBoundedString(raw.createdAt, 80),
+    updatedAt: cleanBoundedString(raw.updatedAt, 80),
+    metadata: {
+      source: cleanBoundedString(metadata.source, 80) || "resumedoc",
+      kind: "work_history",
+      marker: "resumedoc:work-history",
+      organizedAt: cleanBoundedString(metadata.organizedAt, 80),
+      organizerVersion: cleanBoundedString(metadata.organizerVersion, 80),
+    },
+  };
+}
+
 function buildAiSourceChunks(input, job, workEvidence) {
   const candidateSource = normalizeCandidateSource(input.workHistory, input);
   const selectedWorkEvidence = Array.isArray(workEvidence) ? workEvidence : candidateSource.workEvidence;
@@ -1597,7 +1896,7 @@ function stripModelMemoryKey(response) {
 }
 
 function openRouterPacketModel() {
-  return process.env.OPENROUTER_PACKET_MODEL || process.env.OPENROUTER_MODEL || DEFAULT_PACKET_MODEL;
+  return RESUME_PACKET_MODEL;
 }
 
 async function callOpenRouterJson(systemPrompt, userPrompt, options = {}) {
@@ -1609,6 +1908,7 @@ async function callOpenRouterJson(systemPrompt, userPrompt, options = {}) {
     ],
     temperature: 0.18,
     max_tokens: options.maxTokens || 2600,
+    reasoning: RESUME_PACKET_REASONING,
     response_format: { type: "json_object" },
   };
   if (options.allowWeb) {
@@ -2374,12 +2674,26 @@ function normalizeInput(value) {
     phone: cleanBoundedString(value.phone, 80),
     location: cleanBoundedString(value.location, 180),
     targetRole: cleanBoundedString(value.targetRole, 180),
+    jobPostNoteId: cleanBoundedString(value.jobPostNoteId, 160),
+    workHistoryProfileId: cleanBoundedString(value.workHistoryProfileId, 160) || WORK_HISTORY_PROFILE_ID,
     jobPost: clipMultilineText(value.jobPost, MAX_TEXT),
     workHistory: clipMultilineText(value.workHistory, MAX_TEXT),
     notes: clipMultilineText(value.notes, 6000),
     accentHex: DEFAULT_ACCENT_HEX,
   };
   return input;
+}
+
+function normalizePackageInput(value = {}) {
+  return withoutUndefined({
+    fullName: cleanBoundedString(value.fullName, 160),
+    email: cleanBoundedString(value.email, 180),
+    phone: cleanBoundedString(value.phone, 80),
+    location: cleanBoundedString(value.location, 180),
+    targetRole: cleanBoundedString(value.targetRole, 180),
+    jobPostNoteId: cleanBoundedString(value.jobPostNoteId, 160),
+    workHistoryProfileId: cleanBoundedString(value.workHistoryProfileId, 160) || WORK_HISTORY_PROFILE_ID,
+  });
 }
 
 function clipMultilineText(value, limit) {

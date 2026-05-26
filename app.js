@@ -10,6 +10,8 @@ const requiredFields = [
 ];
 const APP_ID = config.appId || "resumedoc";
 const JOBEL_NOTE_MARKER = "ai:jobel-note";
+const JOB_POSTING_NOTE_MARKER = "resumedoc:job-posting";
+const WORK_HISTORY_PROFILE_ID = "workHistory";
 const NOTE_SYNC_STATUSES = {
   not_synced: ["Not synced", "neutral"],
   pending: ["Pending", "warn"],
@@ -35,6 +37,10 @@ const state = {
   notes: [],
   notesLoaded: false,
   activeNoteId: null,
+  sourceRefs: {
+    jobPostNoteId: "",
+    workHistoryProfileId: WORK_HISTORY_PROFILE_ID,
+  },
   notesPanel: "notes",
   noteFilter: "all",
   drawerOpen: false,
@@ -204,6 +210,18 @@ function packageInput() {
   };
 }
 
+function packageSaveInput(formInput = packageInput(), sourceRefs = state.sourceRefs) {
+  return {
+    fullName: formInput.fullName || "",
+    email: formInput.email || "",
+    phone: formInput.phone || "",
+    location: formInput.location || "",
+    targetRole: formInput.targetRole || "",
+    jobPostNoteId: sourceRefs?.jobPostNoteId || "",
+    workHistoryProfileId: sourceRefs?.workHistoryProfileId || WORK_HISTORY_PROFILE_ID,
+  };
+}
+
 function setPackageInput(input = {}) {
   els.fullName.value = input.fullName || "";
   els.resumeEmail.value = input.email || "";
@@ -212,7 +230,11 @@ function setPackageInput(input = {}) {
   els.targetRole.value = input.targetRole || "";
   els.jobPost.value = input.jobPost || "";
   els.workHistory.value = input.workHistory || "";
-  els.notes.value = input.notes || "";
+  els.notes.value = "";
+  state.sourceRefs = {
+    jobPostNoteId: input.jobPostNoteId || "",
+    workHistoryProfileId: input.workHistoryProfileId || WORK_HISTORY_PROFILE_ID,
+  };
 }
 
 function completionPercent() {
@@ -526,6 +548,7 @@ async function initializeFirebase() {
       state.packages = [];
       state.packagesLoaded = false;
       state.activeNoteId = null;
+      state.sourceRefs = { jobPostNoteId: "", workHistoryProfileId: WORK_HISTORY_PROFILE_ID };
       state.jobelMessages = [];
       state.access = null;
       state.admin = { summary: null, users: [], codes: [], events: [] };
@@ -584,10 +607,34 @@ async function signOut() {
   log("Signed out.");
 }
 
+async function prepareSourcesForSave(formInput = packageInput()) {
+  const result = await api("/sources/prepare", {
+    method: "POST",
+    body: JSON.stringify({
+      packageId: state.activePackage?.id || "",
+      jobPostNoteId: state.sourceRefs.jobPostNoteId || "",
+      input: {
+        targetRole: formInput.targetRole,
+        jobPost: formInput.jobPost,
+        workHistory: formInput.workHistory,
+      },
+    }),
+  });
+  state.sourceRefs = {
+    jobPostNoteId: result.sources?.jobPostNoteId || state.sourceRefs.jobPostNoteId || "",
+    workHistoryProfileId: result.sources?.workHistoryProfileId || WORK_HISTORY_PROFILE_ID,
+  };
+  if (typeof result.jobPost === "string") els.jobPost.value = result.jobPost;
+  if (typeof result.workHistory === "string") els.workHistory.value = result.workHistory;
+  return result;
+}
+
 async function savePackage() {
   setBusy(true);
   try {
-    const input = packageInput();
+    const formInput = packageInput();
+    await prepareSourcesForSave(formInput);
+    const input = packageSaveInput({ ...formInput, jobPost: els.jobPost.value.trim(), workHistory: els.workHistory.value.trim() });
     const pkg = state.activePackage;
     const result = pkg?.id
       ? await api(`/packages/${encodeURIComponent(pkg.id)}`, {
@@ -600,7 +647,7 @@ async function savePackage() {
         });
     setActivePackage(result.package);
     await loadPackages();
-    log("Package saved.");
+    log("Sources organized and package saved.");
     return result.package;
   } catch (error) {
     log(error.message);
@@ -638,6 +685,7 @@ async function loadPackages() {
     state.packagesLoaded = true;
     log(error.message);
   } finally {
+    if (els.resumeFile) els.resumeFile.value = "";
     render();
   }
 }
@@ -783,11 +831,12 @@ async function handlePaymentReturn() {
 async function generateDocx() {
   const saved = await savePackage();
   if (!saved) return;
+  const extraDirection = els.notes.value.trim();
   setBusy(true);
   try {
     const result = await api(`/packages/${encodeURIComponent(saved.id)}/generate`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ extraDirection }),
     });
     setActivePackage(result.package);
     await loadPackages();
@@ -862,12 +911,12 @@ function safeFileName(value) {
 
 async function extractFileText(file) {
   if (!file) return;
-  els.fileLabel.textContent = `Reading ${file.name}...`;
+  els.fileLabel.textContent = "Reading upload...";
   try {
     if (/\.txt$/i.test(file.name) || file.type.startsWith("text/")) {
       const text = await file.text();
       appendWorkHistory(text);
-      els.fileLabel.textContent = `${file.name} extracted.`;
+      els.fileLabel.textContent = "Upload extracted into work history.";
       return;
     }
     const base64 = await fileToBase64(file);
@@ -880,9 +929,9 @@ async function extractFileText(file) {
       }),
     });
     appendWorkHistory(result.text || "");
-    els.fileLabel.textContent = `${file.name} extracted.`;
+    els.fileLabel.textContent = "Upload extracted into work history.";
   } catch (error) {
-    els.fileLabel.textContent = `${file.name} could not be extracted.`;
+    els.fileLabel.textContent = "Upload could not be extracted.";
     log(error.message);
   } finally {
     render();
@@ -966,9 +1015,11 @@ function normalizeNoteDoc(docLike) {
 function normalizeNoteMetadata(metadata = {}) {
   const source = metadata.source === "jobel" ? "jobel" : "user";
   const isJobel = source === "jobel" || metadata.marker === JOBEL_NOTE_MARKER;
+  const isJobPosting = metadata.kind === "job_posting" || metadata.marker === JOB_POSTING_NOTE_MARKER;
   return {
     source: isJobel ? "jobel" : "user",
-    marker: isJobel ? JOBEL_NOTE_MARKER : metadata.marker || null,
+    kind: isJobPosting ? "job_posting" : cleanClientString(metadata.kind || "note", 80),
+    marker: isJobel ? JOBEL_NOTE_MARKER : isJobPosting ? JOB_POSTING_NOTE_MARKER : metadata.marker || null,
     readOnly: isJobel || metadata.readOnly === true,
     contentFormat: metadata.contentFormat === "markdown" ? "markdown" : "plain",
   };
@@ -992,15 +1043,26 @@ function cleanClientString(value, max) {
 }
 
 function noteTitle(note) {
-  return note?.title || (isJobelNote(note) ? "Jobel note" : "Untitled note");
+  return note?.title || (isJobelNote(note) ? "Jobel note" : isJobPostingNote(note) ? "Job posting reference" : "Untitled note");
 }
 
 function isJobelNote(note) {
   return normalizeNoteMetadata(note?.metadata).source === "jobel";
 }
 
+function isJobPostingNote(note) {
+  const metadata = normalizeNoteMetadata(note?.metadata);
+  return metadata.kind === "job_posting" || metadata.marker === JOB_POSTING_NOTE_MARKER;
+}
+
 function noteStatus(note) {
   return note?.brainSync?.status || "not_synced";
+}
+
+function noteTypeLabel(note) {
+  if (isJobelNote(note)) return "Jobel";
+  if (isJobPostingNote(note)) return "Job posting";
+  return "Your note";
 }
 
 function activeNote() {
@@ -1011,6 +1073,7 @@ function noteMatchesFilter(note) {
   const filter = state.noteFilter;
   if (filter === "user") return !isJobelNote(note);
   if (filter === "jobel") return isJobelNote(note);
+  if (filter === "job_posting") return isJobPostingNote(note);
   if (filter === "synced") return noteStatus(note) === "synced";
   if (filter === "pending") return noteStatus(note) === "pending";
   if (filter === "failed") return noteStatus(note) === "failed";
@@ -1170,14 +1233,14 @@ function noteCardHtml(note) {
   const date = note.updatedAt ? shortDate(note.updatedAt) : "";
   const preview = note.body || "Empty note";
   return `
-    <button class="note-card ${isJobelNote(note) ? "jobel" : ""} ${note.id === state.activeNoteId ? "active" : ""}" type="button" data-note-id="${escapeHtml(note.id)}">
+    <button class="note-card ${isJobelNote(note) ? "jobel" : ""} ${isJobPostingNote(note) ? "job-posting" : ""} ${note.id === state.activeNoteId ? "active" : ""}" type="button" data-note-id="${escapeHtml(note.id)}">
       <span class="note-card-head">
         <strong>${escapeHtml(noteTitle(note))}</strong>
         <span class="pill ${escapeHtml(status[1])}">${escapeHtml(status[0])}</span>
       </span>
       <p>${escapeHtml(clipClientText(preview, 220))}</p>
       <span class="note-card-meta">
-        <span>${escapeHtml(isJobelNote(note) ? "Jobel" : "Your note")}</span>
+        <span>${escapeHtml(noteTypeLabel(note))}</span>
         ${date ? `<span>${escapeHtml(date)}</span>` : ""}
         ${note.syncToBrain ? "<span>AI Brain sync on</span>" : ""}
       </span>
@@ -1218,7 +1281,9 @@ async function saveNote(event) {
     body,
     updatedAt: now,
     createdAt: current?.createdAt || now,
-    metadata: { source: "user", readOnly: false, contentFormat: "plain" },
+    metadata: isJobPostingNote(current)
+      ? { source: "user", kind: "job_posting", marker: JOB_POSTING_NOTE_MARKER, readOnly: false, contentFormat: "markdown" }
+      : { source: "user", kind: "note", readOnly: false, contentFormat: "plain" },
     syncToBrain,
     brainSync: noteBrainSyncForSave(current, syncToBrain),
   });
