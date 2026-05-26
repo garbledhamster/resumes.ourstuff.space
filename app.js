@@ -210,8 +210,8 @@ function packageInput() {
   };
 }
 
-function packageSaveInput(formInput = packageInput(), sourceRefs = state.sourceRefs) {
-  return {
+function packageSaveInput(formInput = packageInput(), sourceRefs = state.sourceRefs, options = {}) {
+  const input = {
     fullName: formInput.fullName || "",
     email: formInput.email || "",
     phone: formInput.phone || "",
@@ -220,6 +220,12 @@ function packageSaveInput(formInput = packageInput(), sourceRefs = state.sourceR
     jobPostNoteId: sourceRefs?.jobPostNoteId || "",
     workHistoryProfileId: sourceRefs?.workHistoryProfileId || WORK_HISTORY_PROFILE_ID,
   };
+  if (options.includeInlineSources) {
+    input.jobPost = formInput.jobPost || "";
+    input.workHistory = formInput.workHistory || "";
+    input.notes = formInput.notes || "";
+  }
+  return input;
 }
 
 function setPackageInput(input = {}) {
@@ -608,18 +614,26 @@ async function signOut() {
 }
 
 async function prepareSourcesForSave(formInput = packageInput()) {
-  const result = await api("/sources/prepare", {
-    method: "POST",
-    body: JSON.stringify({
-      packageId: state.activePackage?.id || "",
-      jobPostNoteId: state.sourceRefs.jobPostNoteId || "",
-      input: {
-        targetRole: formInput.targetRole,
-        jobPost: formInput.jobPost,
-        workHistory: formInput.workHistory,
-      },
-    }),
-  });
+  let result;
+  try {
+    result = await api("/sources/prepare", {
+      method: "POST",
+      body: JSON.stringify({
+        packageId: state.activePackage?.id || "",
+        jobPostNoteId: state.sourceRefs.jobPostNoteId || "",
+        input: {
+          targetRole: formInput.targetRole,
+          jobPost: formInput.jobPost,
+          workHistory: formInput.workHistory,
+        },
+      }),
+    });
+  } catch (error) {
+    if (isSourcePrepareUnavailable(error)) {
+      return { ok: false, unavailable: true };
+    }
+    throw error;
+  }
   state.sourceRefs = {
     jobPostNoteId: result.sources?.jobPostNoteId || state.sourceRefs.jobPostNoteId || "",
     workHistoryProfileId: result.sources?.workHistoryProfileId || WORK_HISTORY_PROFILE_ID,
@@ -629,12 +643,17 @@ async function prepareSourcesForSave(formInput = packageInput()) {
   return result;
 }
 
+function isSourcePrepareUnavailable(error) {
+  return error?.status === 404 && /\/sources\/prepare|\/api\/sources\/prepare|route not found/i.test(error.message || "");
+}
+
 async function savePackage() {
   setBusy(true);
   try {
     const formInput = packageInput();
-    await prepareSourcesForSave(formInput);
-    const input = packageSaveInput({ ...formInput, jobPost: els.jobPost.value.trim(), workHistory: els.workHistory.value.trim() });
+    const prepared = await prepareSourcesForSave(formInput);
+    const currentInput = { ...formInput, jobPost: els.jobPost.value.trim(), workHistory: els.workHistory.value.trim() };
+    const input = packageSaveInput(currentInput, state.sourceRefs, { includeInlineSources: prepared?.unavailable === true });
     const pkg = state.activePackage;
     const result = pkg?.id
       ? await api(`/packages/${encodeURIComponent(pkg.id)}`, {
@@ -647,7 +666,7 @@ async function savePackage() {
         });
     setActivePackage(result.package);
     await loadPackages();
-    log("Sources organized and package saved.");
+    log(prepared?.unavailable ? "Package saved with inline sources." : "Sources organized and package saved.");
     return result.package;
   } catch (error) {
     log(error.message);
