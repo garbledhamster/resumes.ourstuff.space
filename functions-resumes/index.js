@@ -14,6 +14,7 @@ admin.initializeApp();
 
 const WORKER_INTERNAL_TOKEN_SECRET = defineSecret("WORKER_INTERNAL_TOKEN");
 const AI_BRAIN_API_TOKEN_SECRET = defineSecret("AI_BRAIN_API_TOKEN");
+const OPENROUTER_API_KEY_SECRET = defineSecret("OPENROUTER_API_KEY");
 
 const TEMPLATE_PATH = path.join(__dirname, "assets", "interview-packet-template.docx");
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
@@ -122,7 +123,7 @@ const GENERATED_PACKET_PATTERNS = [
 ];
 const JOB_POST_NOISE_PATTERNS = [
   /\bjob post(?:ing)?\b/i,
-  /\bSJE\s*\d*(?:\.\d+)*/i,
+  /\bSJE\s+\d+(?:\.\d+)*/i,
   /\bhybrid\b/i,
   /\bfull[- ]time\b/i,
   /\bpart[- ]time\b/i,
@@ -543,7 +544,7 @@ exports.resumeApi = onRequest(
     timeoutSeconds: 540,
     memory: "1GiB",
     maxInstances: 10,
-    secrets: [WORKER_INTERNAL_TOKEN_SECRET, AI_BRAIN_API_TOKEN_SECRET],
+    secrets: [WORKER_INTERNAL_TOKEN_SECRET, AI_BRAIN_API_TOKEN_SECRET, OPENROUTER_API_KEY_SECRET],
   },
   app,
 );
@@ -1213,6 +1214,9 @@ async function buildPacketResponse(input, revisionInstruction) {
       return validatePacketResponse(response, input);
     } catch (error) {
       console.warn("openrouter_generation_failed", error.message);
+      if (error.statusCode && error.statusCode < 500) {
+        throw error;
+      }
       throw httpError(502, "ResumeDoc could not get a usable AI packet. No fallback DOCX was generated.", "ai_generation_failed");
     }
   }
@@ -2192,7 +2196,7 @@ function assertPacketContentQuality(data, input) {
     issues.push("job_post_header_used_as_content");
   }
   if (issues.length) {
-    throw new Error(`Generated packet failed quality checks: ${[...new Set(issues)].join(", ")}`);
+    throw httpError(422, `Generated packet failed quality checks: ${[...new Set(issues)].join(", ")}`, "packet_quality_failed");
   }
 }
 
@@ -3215,7 +3219,7 @@ function isUsefulCandidateEvidenceLine(line) {
 
 function cleanEvidenceLine(line) {
   return asText(line)
-    .replace(/\bSJE\s*\d+(?:\.\d+)*\b/gi, " ")
+    .replace(/\bSJE\s+\d+(?:\.\d+)*\b/gi, " ")
     .replace(/\s+/g, " ")
     .replace(/^[*-]\s*/, "")
     .trim();
