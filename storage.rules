@@ -1,0 +1,33 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    match /brain_artifacts/{uid}/{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    match /users/{uid}/apps/{appId}/media/{path=**} {
+      allow read, write: if isSelf(uid);
+    }
+
+    match /users/{uid}/pyxdia/letters/{letterId}/images/{imageId} {
+      allow read, write: if isSelf(uid);
+    }
+
+    match /resume-packages/{uid}/{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

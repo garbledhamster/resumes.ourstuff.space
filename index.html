@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ResumeDoc | resumes.ourstuff.space</title>
+    <meta
+      name="description"
+      content="Create a polished DOCX resume and interview packet from your details and a job posting."
+    />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/">
+          <span class="brand-mark">RD</span>
+          <span>
+            <strong>ResumeDoc</strong>
+            <small>resumes.ourstuff.space</small>
+          </span>
+        </a>
+        <div class="topbar-actions">
+          <span id="connectionState" class="pill neutral">Checking API</span>
+          <span id="authState" class="pill neutral">Signed out</span>
+          <button id="signOutBtn" class="button ghost hidden" type="button">
+            Sign out
+          </button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="hero">
+          <div class="hero-copy">
+            <div class="hero-kickers">
+              <span>$4.99 package</span>
+              <span>5 included edits</span>
+              <span>DOCX export</span>
+            </div>
+            <h1>Build a complete resume packet from real job details.</h1>
+            <p>
+              Sign in, start one paid package, paste your resume history and the
+              job posting, then generate the finished DOCX interview packet.
+            </p>
+          </div>
+          <div class="status-panel" aria-live="polite">
+            <span class="eyebrow">Current package</span>
+            <h2 id="packageTitle">No package yet</h2>
+            <p id="packageSubtitle">Create or load a package to begin.</p>
+            <div class="meter" aria-label="Required details completion">
+              <span id="completionBar"></span>
+            </div>
+            <div class="status-grid">
+              <div>
+                <strong id="completionLabel">0%</strong>
+                <span>details</span>
+              </div>
+              <div>
+                <strong id="paymentLabel">Unpaid</strong>
+                <span>payment</span>
+              </div>
+              <div>
+                <strong id="editsLabel">5</strong>
+                <span>edits left</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="steps" aria-label="Resume package workflow">
+          <article data-step="account">
+            <span>01</span>
+            <strong>Account</strong>
+            <p>Sign in so your package and files stay attached to you.</p>
+          </article>
+          <article data-step="checkout">
+            <span>02</span>
+            <strong>Checkout</strong>
+            <p>Pay for one resume package through Stripe Checkout.</p>
+          </article>
+          <article data-step="details">
+            <span>03</span>
+            <strong>Details</strong>
+            <p>Add resume history, job posting, and direction.</p>
+          </article>
+          <article data-step="generate">
+            <span>04</span>
+            <strong>Generate</strong>
+            <p>Create the filled DOCX interview packet.</p>
+          </article>
+          <article data-step="download">
+            <span>05</span>
+            <strong>Download</strong>
+            <p>Download the latest completed DOCX file.</p>
+          </article>
+        </section>
+
+        <section class="workspace">
+          <div class="primary-column">
+            <section id="accountPanel" class="panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">Account</span>
+                  <h2>Sign in to start</h2>
+                </div>
+                <span id="accountBadge" class="pill neutral">Required</span>
+              </div>
+              <form id="authForm" class="auth-grid">
+                <label>
+                  <span>Email</span>
+                  <input id="emailInput" autocomplete="email" type="email" />
+                </label>
+                <label>
+                  <span>Password</span>
+                  <input
+                    id="passwordInput"
+                    autocomplete="current-password"
+                    type="password"
+                  />
+                </label>
+                <div class="button-row">
+                  <button class="button primary" type="submit">Sign in</button>
+                  <button id="createAccountBtn" class="button" type="button">
+                    Create account
+                  </button>
+                  <button id="googleBtn" class="button" type="button">
+                    Google
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">Resume details</span>
+                  <h2>Create your package brief</h2>
+                </div>
+                <span id="detailBadge" class="pill warn">Needs details</span>
+              </div>
+              <form id="packageForm" class="form-grid">
+                <label>
+                  <span>Full name *</span>
+                  <input id="fullName" name="fullName" autocomplete="name" />
+                </label>
+                <label>
+                  <span>Target role *</span>
+                  <input id="targetRole" name="targetRole" />
+                </label>
+                <label>
+                  <span>Email *</span>
+                  <input id="resumeEmail" name="email" autocomplete="email" />
+                </label>
+                <label>
+                  <span>Phone *</span>
+                  <input id="phone" name="phone" autocomplete="tel" />
+                </label>
+                <label class="wide">
+                  <span>Location *</span>
+                  <input id="location" name="location" />
+                </label>
+                <label class="wide">
+                  <span>Job posting *</span>
+                  <textarea
+                    id="jobPost"
+                    name="jobPost"
+                    rows="8"
+                    placeholder="Paste the full job posting or role description."
+                  ></textarea>
+                </label>
+                <label class="wide">
+                  <span>Work history *</span>
+                  <textarea
+                    id="workHistory"
+                    name="workHistory"
+                    rows="10"
+                    placeholder="Paste resume content, achievements, tools, dates, certifications, projects, and responsibilities."
+                  ></textarea>
+                </label>
+                <label class="wide">
+                  <span>Extra direction</span>
+                  <textarea
+                    id="notes"
+                    name="notes"
+                    rows="5"
+                    placeholder="Optional tone, sections, industries, constraints, or details to handle carefully."
+                  ></textarea>
+                </label>
+              </form>
+
+              <div class="upload-strip">
+                <div>
+                  <strong>Upload existing resume</strong>
+                  <p id="fileLabel">
+                    TXT, DOCX, or PDF. Extracted text is added to work history.
+                  </p>
+                </div>
+                <label class="file-button">
+                  Choose file
+                  <input id="resumeFile" type="file" accept=".txt,.docx,.pdf" />
+                </label>
+              </div>
+
+              <div class="button-row footer-actions">
+                <button id="savePackageBtn" class="button primary" type="button">
+                  Save package
+                </button>
+                <button id="checkoutBtn" class="button accent" type="button">
+                  Pay $4.99
+                </button>
+                <button id="generateBtn" class="button dark" type="button">
+                  Generate DOCX
+                </button>
+              </div>
+            </section>
+          </div>
+
+          <aside class="side-column">
+            <section class="panel compact">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">Download</span>
+                  <h2>Latest DOCX</h2>
+                </div>
+                <span id="docxBadge" class="pill neutral">Not ready</span>
+              </div>
+              <p id="downloadText">
+                The completed packet will appear here after generation.
+              </p>
+              <button id="downloadBtn" class="button primary full" type="button">
+                Download DOCX
+              </button>
+            </section>
+
+            <section class="panel compact">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">Revisions</span>
+                  <h2>Edit bank</h2>
+                </div>
+                <span id="revisionBadge" class="pill neutral">Locked</span>
+              </div>
+              <textarea
+                id="revisionText"
+                rows="6"
+                placeholder="After generation, request a focused revision."
+              ></textarea>
+              <button id="revisionBtn" class="button dark full" type="button">
+                Submit revision
+              </button>
+            </section>
+
+            <section class="panel compact">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">Status</span>
+                  <h2>Activity</h2>
+                </div>
+              </div>
+              <pre id="activityLog" class="activity">Ready.</pre>
+            </section>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <script src="config.js"></script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
