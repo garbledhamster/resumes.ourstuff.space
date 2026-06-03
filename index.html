@@ -3,466 +3,130 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ResumeDoc | resumes.ourstuff.space</title>
+    <title>ResumeDoc | Targeted resume packets</title>
     <meta
       name="description"
-      content="Create a polished DOCX resume and interview packet from your details and a job posting."
+      content="Build a targeted DOCX resume packet from your real work history and the job posting."
     />
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="styles.css" />
   </head>
-  <body>
+  <body class="site-page">
     <div class="app-shell">
-      <header class="topbar">
-        <a class="brand" href="/">
+      <header class="topbar site-topbar">
+        <a class="brand" href="./">
           <span class="brand-mark">RD</span>
           <span>
             <strong>ResumeDoc</strong>
             <small>resumes.ourstuff.space</small>
           </span>
         </a>
-        <div class="topbar-actions">
-          <span id="connectionState" class="pill neutral">Checking API</span>
-          <span id="authState" class="pill neutral">Signed out</span>
-          <button id="signOutBtn" class="button ghost hidden" type="button">
-            Sign out
-          </button>
-        </div>
+        <nav class="site-nav" aria-label="Primary">
+          <a href="./" aria-current="page">Home</a>
+          <a href="app.html">Workspace</a>
+          <a href="pricing.html">Pricing</a>
+          <a href="help.html">Help</a>
+        </nav>
+        <a class="button primary" href="app.html">Start a packet</a>
       </header>
 
-      <main class="layout">
-        <section class="hero">
-          <div class="hero-copy">
+      <main class="site-main">
+        <section class="marketing-hero">
+          <div class="marketing-copy">
             <div class="hero-kickers">
               <span>$4.99 package</span>
               <span>5 included edits</span>
               <span>DOCX export</span>
             </div>
-            <h1>Build a complete resume packet from real job details.</h1>
+            <h1>Target one job with a resume packet built from real facts.</h1>
             <p>
-              Sign in, start one paid package, paste your resume history and the
-              job posting, then generate the finished DOCX interview packet.
+              ResumeDoc turns your work history, notes, and a job posting into a
+              polished Word packet without inventing experience or flattening
+              your source material.
+            </p>
+            <div class="button-row">
+              <a class="button primary" href="app.html">Open workspace</a>
+              <a class="button" href="pricing.html">View pricing</a>
+            </div>
+          </div>
+
+          <div class="document-visual" aria-label="Resume packet preview">
+            <div class="doc-window">
+              <div class="doc-toolbar">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+              <div class="doc-page">
+                <div class="doc-name">Candidate Name</div>
+                <div class="doc-role">Systems Administrator</div>
+                <div class="doc-line wide"></div>
+                <div class="doc-line"></div>
+                <div class="doc-section">
+                  <strong>Relevant Experience</strong>
+                  <span></span>
+                  <span></span>
+                  <span class="short"></span>
+                </div>
+                <div class="doc-section muted-block">
+                  <strong>Interview Notes</strong>
+                  <span></span>
+                  <span class="short"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="site-band" aria-label="How ResumeDoc works">
+          <div class="section-heading">
+            <span class="eyebrow">Workflow</span>
+            <h2>One clear path from source material to DOCX.</h2>
+          </div>
+          <div class="feature-row">
+            <article>
+              <span>01</span>
+              <h3>Add the real material</h3>
+              <p>Paste the job post, work history, notes, dates, tools, and constraints.</p>
+            </article>
+            <article>
+              <span>02</span>
+              <h3>Generate the packet</h3>
+              <p>Create a targeted resume and interview packet as a downloadable DOCX.</p>
+            </article>
+            <article>
+              <span>03</span>
+              <h3>Use focused edits</h3>
+              <p>Spend the included edit bank on specific corrections and refinements.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="site-split" aria-label="ResumeDoc product areas">
+          <div>
+            <span class="eyebrow">Website structure</span>
+            <h2>A normal site, with the app separated from the homepage.</h2>
+            <p>
+              The homepage explains the product. The workspace handles sign-in,
+              packages, generation, downloads, revisions, notes, and owner admin.
             </p>
           </div>
-          <div class="status-panel" aria-live="polite">
-            <span class="eyebrow">Current package</span>
-            <h2 id="packageTitle">No package yet</h2>
-            <p id="packageSubtitle">Create or load a package to begin.</p>
-            <div class="meter" aria-label="Required details completion">
-              <span id="completionBar"></span>
-            </div>
-            <div class="status-grid">
-              <div>
-                <strong id="completionLabel">0%</strong>
-                <span>details</span>
-              </div>
-              <div>
-                <strong id="paymentLabel">Unpaid</strong>
-                <span>payment</span>
-              </div>
-              <div>
-                <strong id="editsLabel">5</strong>
-                <span>edits left</span>
-              </div>
-            </div>
+          <div class="link-panel">
+            <a href="app.html">
+              <strong>Workspace</strong>
+              <span>Sign in, create packages, generate DOCX files.</span>
+            </a>
+            <a href="pricing.html">
+              <strong>Pricing</strong>
+              <span>See package price, edit count, and access options.</span>
+            </a>
+            <a href="help.html">
+              <strong>Help</strong>
+              <span>Know what to prepare before you start.</span>
+            </a>
           </div>
-        </section>
-
-        <section class="steps" aria-label="Resume package workflow">
-          <article data-step="account">
-            <span>01</span>
-            <strong>Account</strong>
-            <p>Sign in so your package and files stay attached to you.</p>
-          </article>
-          <article data-step="checkout">
-            <span>02</span>
-            <strong>Unlock</strong>
-            <p>Use a free package, code, credit, or Stripe Checkout.</p>
-          </article>
-          <article data-step="details">
-            <span>03</span>
-            <strong>Details</strong>
-            <p>Add resume history, job posting, and direction.</p>
-          </article>
-          <article data-step="generate">
-            <span>04</span>
-            <strong>Generate</strong>
-            <p>Create the filled DOCX interview packet.</p>
-          </article>
-          <article data-step="download">
-            <span>05</span>
-            <strong>Download</strong>
-            <p>Download the latest completed DOCX file.</p>
-          </article>
-        </section>
-
-        <section class="workspace">
-          <div class="primary-column">
-            <section id="accountPanel" class="panel">
-              <div class="panel-heading">
-                <div>
-                  <span class="eyebrow">Account</span>
-                  <h2>Sign in to start</h2>
-                </div>
-                <span id="accountBadge" class="pill neutral">Required</span>
-              </div>
-              <form id="authForm" class="auth-grid">
-                <label>
-                  <span>Email</span>
-                  <input id="emailInput" autocomplete="email" type="email" />
-                </label>
-                <label>
-                  <span>Password</span>
-                  <input
-                    id="passwordInput"
-                    autocomplete="current-password"
-                    type="password"
-                  />
-                </label>
-                <div class="button-row">
-                  <button class="button primary" type="submit">Sign in</button>
-                  <button id="createAccountBtn" class="button" type="button">
-                    Create account
-                  </button>
-                  <button id="googleBtn" class="button" type="button">
-                    Google
-                  </button>
-                </div>
-              </form>
-            </section>
-
-            <section class="panel">
-              <div class="panel-heading">
-                <div>
-                  <span class="eyebrow">Resume details</span>
-                  <h2>Create your package brief</h2>
-                </div>
-                <span id="detailBadge" class="pill warn">Needs details</span>
-              </div>
-              <form id="packageForm" class="form-grid">
-                <label>
-                  <span>Full name *</span>
-                  <input id="fullName" name="fullName" autocomplete="name" />
-                </label>
-                <label>
-                  <span>Target role *</span>
-                  <input id="targetRole" name="targetRole" />
-                </label>
-                <label>
-                  <span>Email *</span>
-                  <input id="resumeEmail" name="email" autocomplete="email" />
-                </label>
-                <label>
-                  <span>Phone *</span>
-                  <input id="phone" name="phone" autocomplete="tel" />
-                </label>
-                <label class="wide">
-                  <span>Location *</span>
-                  <input id="location" name="location" />
-                </label>
-                <label class="wide">
-                  <span>Job posting *</span>
-                  <textarea
-                    id="jobPost"
-                    name="jobPost"
-                    rows="8"
-                    placeholder="Paste the full job posting or role description."
-                  ></textarea>
-                </label>
-                <label class="wide">
-                  <span>Work history *</span>
-                  <textarea
-                    id="workHistory"
-                    name="workHistory"
-                    rows="10"
-                    placeholder="Paste resume content, achievements, tools, dates, certifications, projects, and responsibilities."
-                  ></textarea>
-                </label>
-                <label class="wide">
-                  <span>Extra direction</span>
-                  <textarea
-                    id="notes"
-                    name="notes"
-                    rows="5"
-                    placeholder="Optional tone, sections, industries, constraints, or details to handle carefully."
-                  ></textarea>
-                </label>
-              </form>
-
-              <div class="upload-strip">
-                <div>
-                  <strong>Upload existing resume</strong>
-                  <p id="fileLabel">
-                    TXT, DOCX, or PDF. Extracted text is added to work history.
-                  </p>
-                </div>
-                <label class="file-button">
-                  Choose file
-                  <input id="resumeFile" type="file" accept=".txt,.docx,.pdf" />
-                </label>
-              </div>
-
-              <div class="access-tools">
-                <div>
-                  <strong id="accessTitle">Package access</strong>
-                  <p id="accessText">Sign in to load free package credits and codes.</p>
-                </div>
-                <div class="code-row">
-                  <input
-                    id="discountCode"
-                    type="text"
-                    autocomplete="off"
-                    placeholder="Code"
-                  />
-                  <button id="claimFreeBtn" class="button primary" type="button">
-                    Use free resume
-                  </button>
-                  <button id="redeemCodeBtn" class="button" type="button">
-                    Apply code
-                  </button>
-                </div>
-              </div>
-
-              <div class="button-row footer-actions">
-                <button id="savePackageBtn" class="button primary" type="button">
-                  Save package
-                </button>
-                <button id="checkoutBtn" class="button accent" type="button">
-                  Pay $4.99
-                </button>
-                <button id="generateBtn" class="button dark" type="button">
-                  Generate DOCX
-                </button>
-              </div>
-            </section>
-          </div>
-
-          <aside class="side-column">
-            <section class="panel compact">
-              <div class="panel-heading">
-                <div>
-                  <span class="eyebrow">Resume manager</span>
-                  <h2>Saved packages</h2>
-                </div>
-                <button id="refreshPackagesBtn" class="button" type="button">
-                  Refresh
-                </button>
-              </div>
-              <p id="resumeManagerEmpty">
-                Sign in to see packages saved to your ResumeDoc account.
-              </p>
-              <div id="resumeManagerList" class="resume-manager-list"></div>
-            </section>
-
-            <section class="panel compact">
-              <div class="panel-heading">
-                <div>
-                  <span class="eyebrow">Download</span>
-                  <h2>Latest DOCX</h2>
-                </div>
-                <span id="docxBadge" class="pill neutral">Not ready</span>
-              </div>
-              <p id="downloadText">
-                The completed packet will appear here after generation.
-              </p>
-              <button id="downloadBtn" class="button primary full" type="button">
-                Download DOCX
-              </button>
-            </section>
-
-            <section class="panel compact">
-              <div class="panel-heading">
-                <div>
-                  <span class="eyebrow">Revisions</span>
-                  <h2>Edit bank</h2>
-                </div>
-                <span id="revisionBadge" class="pill neutral">Locked</span>
-              </div>
-              <textarea
-                id="revisionText"
-                rows="6"
-                placeholder="After generation, request a focused revision."
-              ></textarea>
-              <button id="revisionBtn" class="button dark full" type="button">
-                Submit revision
-              </button>
-            </section>
-
-            <section class="panel compact">
-              <div class="panel-heading">
-                <div>
-                  <span class="eyebrow">Status</span>
-                  <h2>Activity</h2>
-                </div>
-              </div>
-              <pre id="activityLog" class="activity">Ready.</pre>
-            </section>
-          </aside>
-        </section>
-
-        <section id="adminPanel" class="admin-panel panel hidden" aria-label="ResumeDoc admin">
-          <div class="panel-heading">
-            <div>
-              <span class="eyebrow">Owner admin</span>
-              <h2>ResumeDoc controls</h2>
-            </div>
-            <span id="adminBadge" class="pill neutral">Loading</span>
-          </div>
-
-          <div id="adminStats" class="admin-stats"></div>
-
-          <div class="admin-grid">
-            <section class="admin-block">
-              <div class="admin-block-heading">
-                <strong>Users</strong>
-                <div class="code-row compact-row">
-                  <input id="adminUserSearch" type="search" placeholder="Email or uid hash" />
-                  <button id="adminUserSearchBtn" class="button" type="button">Search</button>
-                </div>
-              </div>
-              <div id="adminUsers" class="admin-list"></div>
-            </section>
-
-            <section class="admin-block">
-              <div class="admin-block-heading">
-                <strong>Codes</strong>
-              </div>
-              <form id="adminCodeForm" class="admin-code-form">
-                <input id="adminCodeValue" placeholder="CODE" />
-                <select id="adminCodeKind" aria-label="Code kind">
-                  <option value="credit">Package credit</option>
-                  <option value="stripe">Stripe discount</option>
-                </select>
-                <input id="adminCodeUses" type="number" min="1" placeholder="Uses" />
-                <input id="adminCodeCreditAmount" type="number" min="1" value="1" />
-                <input id="adminCodePercent" type="number" min="1" max="100" placeholder="% off" />
-                <input id="adminCodeAmount" type="number" min="50" max="499" placeholder="Cents off" />
-                <button class="button primary" type="submit">Create code</button>
-              </form>
-              <div id="adminCodes" class="admin-list"></div>
-            </section>
-          </div>
-
-          <section class="admin-block">
-            <div class="admin-block-heading">
-              <strong>Recent events</strong>
-            </div>
-            <div id="adminEvents" class="admin-list compact-events"></div>
-          </section>
         </section>
       </main>
     </div>
-
-    <div class="notes-launcher" aria-label="Notes and Jobel tools">
-      <button id="notesLauncherBtn" class="notes-launcher-btn" type="button">
-        Notes
-      </button>
-      <button id="jobelLauncherBtn" class="notes-launcher-btn accent" type="button">
-        Chat with Jobel
-      </button>
-    </div>
-
-    <section
-      id="notesDrawer"
-      class="notes-drawer hidden"
-      aria-label="Resume notes and Jobel"
-      aria-hidden="true"
-    >
-      <button id="notesDrawerBackdrop" class="notes-drawer-backdrop" type="button" aria-label="Close notes"></button>
-      <div class="notes-drawer-panel">
-        <div class="notes-drawer-head">
-          <div>
-            <span class="eyebrow">Resume notes</span>
-            <h2>Build with Jobel</h2>
-          </div>
-          <button id="closeNotesDrawerBtn" class="icon-button" type="button" aria-label="Close notes">
-            ×
-          </button>
-        </div>
-
-        <div class="notes-tabs" role="tablist" aria-label="Notes drawer views">
-          <button id="notesPanelTab" class="notes-tab active" type="button" data-notes-panel="notes">
-            Notes
-          </button>
-          <button id="jobelPanelTab" class="notes-tab" type="button" data-notes-panel="jobel">
-            Jobel
-          </button>
-        </div>
-
-        <div id="notesPanel" class="notes-panel active">
-          <div class="notes-toolbar">
-            <select id="noteFilter" aria-label="Filter notes">
-              <option value="all">All notes</option>
-              <option value="user">Your notes</option>
-              <option value="job_posting">Job postings</option>
-              <option value="jobel">Jobel notes</option>
-              <option value="synced">Synced</option>
-              <option value="pending">Pending</option>
-              <option value="failed">Failed</option>
-            </select>
-            <button id="newNoteBtn" class="button primary" type="button">New note</button>
-          </div>
-
-          <div id="notesEmpty" class="notes-empty">
-            Sign in and start a note to build resume context over time.
-          </div>
-          <div id="notesList" class="notes-list"></div>
-
-          <form id="noteEditorForm" class="note-editor">
-            <div class="note-editor-head">
-              <strong id="noteEditorHeading">New note</strong>
-              <span id="noteSyncStatus" class="pill neutral">Not synced</span>
-            </div>
-            <label>
-              <span>Title</span>
-              <input id="noteTitle" maxlength="120" placeholder="What is this note about?" />
-            </label>
-            <label>
-              <span>Note</span>
-              <textarea
-                id="noteBody"
-                rows="8"
-                placeholder="Log resume details, wins, constraints, job ideas, or questions for Jobel."
-              ></textarea>
-            </label>
-            <label class="check-row">
-              <input id="noteSyncCheckbox" type="checkbox" />
-              <span>Sync to ourstuff.space ecosystem</span>
-            </label>
-            <div class="button-row">
-              <button id="saveNoteBtn" class="button primary" type="submit">Save note</button>
-              <button id="deleteNoteBtn" class="button" type="button">Delete</button>
-            </div>
-          </form>
-        </div>
-
-        <div id="jobelPanel" class="notes-panel">
-          <div class="jobel-intro">
-            <strong>Jobel</strong>
-            <p>
-              A resume-development assistant that uses your saved notes and package brief.
-            </p>
-          </div>
-          <div id="jobelMessages" class="jobel-messages" aria-live="polite"></div>
-          <form id="jobelForm" class="jobel-form">
-            <label>
-              <span>Message Jobel</span>
-              <textarea
-                id="jobelInput"
-                rows="4"
-                maxlength="900"
-                placeholder="Ask what to improve, what facts are missing, or how to shape this resume."
-              ></textarea>
-            </label>
-            <button id="sendJobelBtn" class="button accent full" type="submit">
-              Send to Jobel
-            </button>
-          </form>
-        </div>
-      </div>
-    </section>
-
-    <script src="config.js"></script>
-    <script type="module" src="app.js"></script>
   </body>
 </html>
