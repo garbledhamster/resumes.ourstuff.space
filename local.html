@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light">
+  <title>ResumeDoc local workspace</title>
+  <link rel="stylesheet" href="local.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to workspace</a>
+  <header class="site-header"><a href="index.html">ResumeDoc</a><span>Private local workspace</span></header>
+  <main id="main">
+    <section id="start" class="panel hero" aria-labelledby="start-title">
+      <p class="eyebrow">A calmer way back into the job market</p>
+      <h1 id="start-title">Build your resume without creating an account.</h1>
+      <p>Start locally, move at your pace, and keep every change under your control.</p>
+      <div class="notice"><strong>Before you start</strong><p>This workspace saves data in this browser only. It does not use cloud sync, AI, analytics, or payment services. Anyone using this browser profile may be able to open it. Clearing browser data can erase it. Browser storage is not encrypted; export a backup you control.</p></div>
+      <label class="check"><input id="privacyAck" type="checkbox" aria-describedby="startStatus"> I understand how local storage works.</label>
+      <button id="startButton" type="button">Start my local workspace</button>
+      <p id="startStatus" class="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <div id="workspace" hidden>
+      <nav class="steps" aria-label="Workspace steps">
+        <a href="#evidence">1. Evidence</a><a href="#interview">2. Interview</a><a href="#target">3. Target</a><a href="#resume">4. Resume</a><a href="#data">5. My data</a>
+      </nav>
+      <p id="saveStatus" class="status" role="status">Saved in this browser.</p>
+
+      <section id="evidence" class="panel" aria-labelledby="evidence-title">
+        <h2 id="evidence-title">Career evidence</h2>
+        <p>Add one fact at a time. ResumeDoc will propose a structured record. Nothing becomes approved evidence until you accept it.</p>
+        <label>What happened?<textarea id="evidenceRaw" rows="5" maxlength="20000" placeholder="Example: I rebuilt our laptop setup checklist and reduced missed steps."></textarea></label>
+        <div class="grid"><label>Organization or context<input id="evidenceOrg"></label><label>When<input id="evidenceDate" placeholder="Example: 2024"></label><label>Result, if known<input id="evidenceResult" placeholder="Optional"></label><label>Confidence<select id="evidenceConfidence"><option value="confirmed">Confirmed by me</option><option value="estimated">My best estimate</option><option value="uncertain">Uncertain</option></select></label></div>
+        <button id="proposeEvidence" type="button">Review this evidence</button>
+        <div id="proposal" class="proposal" hidden aria-live="polite"></div>
+        <h3>Approved evidence</h3><div id="evidenceList" class="stack"></div>
+      </section>
+
+      <section id="interview" class="panel" aria-labelledby="interview-title">
+        <h2 id="interview-title">Guided interview</h2>
+        <p id="interviewProgress" role="status"></p><div aria-live="polite" aria-atomic="true"><h3 id="interviewQuestion" tabindex="-1"></h3><p id="interviewReason" class="muted"></p></div>
+        <label>Choose what to do with this question<select id="interviewState"><option value="answered">I can answer</option><option value="deferred">Defer this question</option><option value="unknown">I do not know</option><option value="not-applicable">Not applicable</option><option value="private">Keep this private</option></select></label>
+        <label>Your answer<textarea id="interviewAnswer" rows="5"></textarea></label>
+        <div class="actions"><button id="saveAnswer" type="button">Continue</button><button id="deferAnswer" class="secondary" type="button">Skip for now</button></div>
+        <div id="interviewProposal" class="proposal" hidden aria-live="polite"></div>
+        <div id="interviewDeferred" class="muted"></div>
+        <a id="goToResume" class="button-link" href="#resume" hidden>Go to the resume step</a>
+      </section>
+
+      <section id="target" class="panel" aria-labelledby="target-title">
+        <h2 id="target-title">Target role and job</h2>
+        <p>Paste details you already have. This local workspace does not visit a URL or verify its owner. Choose verified only when you confirm that the HTTPS URL is controlled by the employer.</p>
+        <div class="grid"><label>Target role<input id="targetRole"></label><label>Company<input id="targetCompany"></label><label>Location<input id="targetLocation"></label><label>Schedule<input id="targetSchedule" placeholder="Remote, hybrid, shifts"></label><label>Seniority<input id="targetSeniority"></label><label>Compensation<input id="targetCompensation"></label><label>Employer job URL<input id="targetUrl" type="url" placeholder="https://"></label><label>Employer source status<select id="targetVerification"><option value="unverified">Not verified</option><option value="verified">Verified on employer source</option></select></label><label>Checked on<input id="targetChecked" type="date"></label></div>
+        <label>Role direction<textarea id="targetDirection" rows="3" placeholder="What you want next"></textarea></label><label>Exclusions<textarea id="targetExclusions" rows="3" placeholder="Requirements or conditions you do not want"></textarea></label>
+        <label>Job description<textarea id="jobDescription" rows="8" maxlength="50000"></textarea></label>
+        <button id="compareTarget" type="button">Compare with approved evidence</button>
+        <div id="comparisonSummary" class="stack" aria-live="polite"></div>
+      </section>
+
+      <section id="resume" class="panel" aria-labelledby="resume-title">
+        <h2 id="resume-title" class="no-print">Resume version</h2>
+        <p>This draft uses approved evidence only. Review every line before using it.</p>
+        <div class="grid no-print"><label>Your name<input id="candidateName" maxlength="2000"></label><label>Contact line<input id="candidateContact" maxlength="2000" placeholder="email · city · phone"></label></div>
+        <button id="composeResume" class="no-print" type="button">Compose resume version</button>
+        <p id="resumeWordingStatus" class="status no-print" role="status" aria-live="polite"></p>
+        <div id="resumeWordingProposals" class="proposal no-print" aria-labelledby="resume-title" tabindex="-1" hidden></div>
+        <article id="resumePreview" class="resume-sheet" aria-label="Resume preview" tabindex="-1"></article>
+        <div id="resumeTraceability" class="muted no-print" aria-label="Resume traceability"></div>
+        <div class="actions"><button id="printResume" class="secondary" type="button">Print or save as PDF</button><button id="exportResumeText" class="secondary" type="button">Export plain text</button></div>
+      </section>
+
+      <section id="data" class="panel danger" aria-labelledby="data-title">
+        <h2 id="data-title">Your workspace data</h2>
+        <p>Export a readable JSON backup, restore one, or remove the active ResumeDoc workspace and start marker from this browser. Deletion does not remove backup files you exported, browser/device backups, or copies another person made.</p>
+        <div class="actions"><button id="exportWorkspace" type="button">Export backup</button><label class="file-button">Choose backup<input id="importWorkspace" type="file" accept="application/json,.json"></label></div>
+        <fieldset id="importChoice" tabindex="-1" hidden><legend>A workspace already exists. What should happen?</legend><label class="check"><input type="radio" name="collision" value="replace" checked> Replace it with the backup</label><label class="check"><input type="radio" name="collision" value="merge"> Merge approved evidence</label><button id="confirmImport" type="button">Import backup</button></fieldset>
+        <p id="importSummary" role="status"></p>
+        <div class="notice"><strong>Deletion scope</strong><p>Deletes the ResumeDoc local workspace and local start marker in this browser profile. It does not clear unrelated browser data.</p></div><label>Type DELETE to confirm<input id="deleteConfirm" autocomplete="off"></label><button id="deleteWorkspace" class="destructive" type="button">Delete local workspace</button>
+      </section>
+    </div>
+  </main>
+  <noscript>This workspace requires JavaScript, but it does not send your data to a server.</noscript>
+  <script src="local.js" defer></script>
+</body>
+</html>
